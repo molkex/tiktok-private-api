@@ -1,0 +1,33 @@
+[project]
+name = "tiktok-private-api"
+version = "0.4.3"
+description = "Unofficial TikTok Private API SDK — 50+ endpoints, full mobile signing, Android + iOS"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "molkex" }]
+keywords = ["tiktok", "tiktok-api", "private-api", "unofficial", "sdk", "social-media"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Internet",
+]
+dependencies = [
+    "httpx>=0.27",
+    "curl_cffi>=0.7",
+]
+
+[project.urls]
+Homepage = "https://github.com/molkex/tiktok-private-api"
+Documentation = "https://github.com/molkex/tiktok-private-api#endpoints"
+Issues = "https://github.com/molkex/tiktok-private-api/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tiktokflow"]
