@@ -10,6 +10,9 @@ throttled official API.
 > This is a reverse-engineering / automation toolkit. Use it on accounts and
 > data you are authorized to access.
 
+> **Companion Project**: Looking for Instagram & Threads automation?
+> Check out [instagram-private-api](https://github.com/molkex/instagram-private-api) — Pure HTTP/2 zero-device mobile protocol, warmup engine, direct messaging, and Threads radar.
+
 ---
 
 ## Why this instead of the official API
