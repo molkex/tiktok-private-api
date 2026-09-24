@@ -454,7 +454,7 @@ class AndroidTransport:
         except Exception:
             pass
 
-        return {"_empty": True, "status_code": -1, "_write_bypass_failed": True}
+        raise ServerError(f"write failed after {retries} bypass attempts")
 
     # ------------------------------------------------------------------
     # Main request method

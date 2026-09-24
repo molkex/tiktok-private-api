@@ -57,11 +57,14 @@ class AsyncAndroidClient:
         proxy: str | None = None,
         proxies: list[str] | None = None,
         proxy_rotate: str = "round_robin",
+        signer: Any | None = None,
     ):
         kwargs: dict[str, Any] = {
             "device": device, "timeout": timeout,
             "max_retries": max_retries, "full_sign": full_sign,
         }
+        if signer is not None:
+            kwargs["signer"] = signer
         if base_url:
             kwargs["base_url"] = base_url
         if rate_limit is not None:

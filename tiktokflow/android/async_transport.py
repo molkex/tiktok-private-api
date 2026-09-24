@@ -17,8 +17,13 @@ from ..errors import (AuthError, InvalidRequest, RateLimitError, ServerError,
                       TikTokError)
 from .device import API_BASE, Device
 from .ratelimit import RateLimiter
-from .signing import sign_request, sign_request_full
 from .transport import _map_http, _parse_aweme_envelope, _parse_retry_after
+
+try:
+    from .signing import sign_request, sign_request_full
+    _HAS_LOCAL_SIGNING = True
+except ImportError:
+    _HAS_LOCAL_SIGNING = False
 
 DEFAULT_TIMEOUT = 30.0
 MAX_RETRIES = 3
@@ -47,8 +52,10 @@ class AsyncAndroidTransport:
         proxy: str | None = None,
         proxies: list[str] | None = None,
         proxy_rotate: str = "round_robin",
+        signer: Any | None = None,
     ):
         self.device = device
+        self._remote_signer = signer
         self.base_url = base_url.rstrip("/")
         self.max_retries = max_retries
         self.full_sign = full_sign
@@ -121,6 +128,11 @@ class AsyncAndroidTransport:
             self._clients[proxy] = client
             return client
 
+    async def _rotate_client(self, proxy: str | None) -> None:
+        old = self._clients.pop(proxy, None)
+        if old is not None:
+            await old.aclose()
+
     @property
     def _client(self) -> httpx.AsyncClient:
         """Return the first available client (for tests / compat)."""
@@ -182,19 +194,51 @@ class AsyncAndroidTransport:
 
         ts = round(time.time())
         use_full_sign = self.full_sign if full_sign is None else full_sign
-        if use_full_sign:
-            sign_headers = sign_request_full(
-                self.device,
-                query_string=query_string,
-                body=body_bytes,
-                ts=ts,
-            )
-        else:
-            sign_headers = sign_request(
+
+        if self._remote_signer:
+            api_path = path.split("?")[0] if "?" in path else path
+            if not api_path.startswith("/"):
+                from urllib.parse import urlparse
+                api_path = urlparse(api_path).path
+            sign_headers, ts = self._remote_signer.sign(
                 query_string=query_string,
                 body=body_bytes,
                 cookie_string=self.device.cookie_string(),
-                ts=ts,
+                path=api_path,
+                method=method,
+                full_sign=use_full_sign,
+                device_id=self.device.device_id,
+                install_id=self.device.install_id,
+                device_type=self.device.device_type,
+                device_brand=self.device.device_brand,
+                channel=self.device.channel,
+                app_version=self.device.app_version,
+                version_code=self.device.version_code,
+                manifest_version_code=self.device.manifest_version_code,
+                device_token=self.device.device_token,
+                dtoken_sign=self.device.dtoken_sign,
+                token=self.device.token,
+                ts_sign=self.device.ts_sign,
+            )
+        elif _HAS_LOCAL_SIGNING:
+            if use_full_sign:
+                sign_headers = sign_request_full(
+                    self.device,
+                    query_string=query_string,
+                    body=body_bytes,
+                    ts=ts,
+                )
+            else:
+                sign_headers = sign_request(
+                    query_string=query_string,
+                    body=body_bytes,
+                    cookie_string=self.device.cookie_string(),
+                    ts=ts,
+                )
+        else:
+            raise RuntimeError(
+                "No signing available — provide a RemoteSigner via signer= parameter "
+                "or install the full package with signing modules"
             )
 
         hdrs: dict[str, str] = dict(self.device.headers())
@@ -217,6 +261,16 @@ class AsyncAndroidTransport:
                         headers=hdrs,
                     )
                     break
+                except httpx.DecodingError:
+                    resp = await client.send(
+                        client.build_request(
+                            method, full_url,
+                            json=json if body_bytes is None and json is not None else None,
+                            content=body_bytes,
+                            headers={**hdrs, "Accept-Encoding": "identity"},
+                        )
+                    )
+                    break
                 except httpx.TransportError as e:
                     last_exc = ServerError(f"transport error: {e}")
                     continue
@@ -237,6 +291,12 @@ class AsyncAndroidTransport:
                     await self._sleep(attempt, None)
                     continue
                 raise ServerError(f"server error {resp.status_code}", http_status=resp.status_code)
+
+            if (resp.status_code == 200 and not resp.content
+                    and attempt < self.max_retries):
+                await self._rotate_client(proxy)
+                await self._sleep(attempt, None)
+                continue
 
             if raw:
                 if resp.status_code >= 400:
