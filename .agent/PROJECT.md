@@ -9,3 +9,5 @@
 ## Проверка
 - `python -c "import tiktokflow"` — импорт пакета
 - тесты/линтер проекта, если есть (`pytest`, `ruff check`)
+
+**CI.** manager-ci (секреты + синтаксис). GitHub Pages отключён (библиотека, сайт не нужен).
