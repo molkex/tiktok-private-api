@@ -1,0 +1,9 @@
+# Правила для агентов Manager (docs/AGENT_SYSTEM.md, раздел 7)
+autonomy: 1            # 0 — только чтение; 1 — изменения только через PR; 2 — мелочь мержится сама; 3 — выкатка с автооткатом
+branches: "agent/*"
+protected: [main, master]
+require_pr: true
+require_owner_yes: [deploy, migrations, delete_data, secrets, payments, dns, open_ports]
+owner_only:            # эти пути агенты не меняют и не анализируют глубже, чем нужно для обвязки
+  - "tiktokflow/android/"    # мобильная подпись (gorgon/argus/ladon) и device guard — обход подписей запросов
+  - "tiktokflow/ios/device.py"    # эмуляция отпечатка устройства iOS
