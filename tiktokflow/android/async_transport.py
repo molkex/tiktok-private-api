@@ -1,13 +1,15 @@
-"""Async Android mobile API transport: httpx.AsyncClient + auto-signing.
+"""Async Android mobile API transport (public, hosted-signing).
 
-Drop-in async replacement for AndroidTransport. Same signing, retry,
-envelope parsing, proxy rotation, and rate limiting — but all I/O is
-non-blocking and sleeps use ``asyncio.sleep``."""
+Async drop-in for :class:`AndroidTransport`. All signing is delegated to
+:class:`RemoteSigner` running against the hosted signing service — the
+mobile signing algorithm never leaves it. :class:`RemoteSigner` is sync
+(httpx.Client), so the sign call runs in a worker thread via
+``asyncio.to_thread`` to stay non-blocking.
+"""
 from __future__ import annotations
 
 import asyncio
 import random
-import time
 from typing import Any, Mapping
 from urllib.parse import urlencode
 
@@ -17,7 +19,6 @@ from ..errors import (AuthError, InvalidRequest, RateLimitError, ServerError,
                       TikTokError)
 from .device import API_BASE, Device
 from .ratelimit import RateLimiter
-from .signing import sign_request, sign_request_full
 from .transport import _map_http, _parse_aweme_envelope, _parse_retry_after
 
 DEFAULT_TIMEOUT = 30.0
@@ -27,10 +28,8 @@ MAX_RETRIES = 3
 class AsyncAndroidTransport:
     """Async variant of :class:`AndroidTransport`.
 
-    Uses ``httpx.AsyncClient`` instead of ``httpx.Client``. API surface
-    mirrors the sync version so async endpoint classes can call
-    ``await self._t.get(...)`` / ``await self._t.post(...)`` with the
-    same arguments.
+    Mirrors the sync API surface: endpoint classes can ``await
+    self._t.get(...)`` / ``await self._t.post(...)`` with the same args.
     """
 
     def __init__(
@@ -47,8 +46,17 @@ class AsyncAndroidTransport:
         proxy: str | None = None,
         proxies: list[str] | None = None,
         proxy_rotate: str = "round_robin",
+        signer: Any | None = None,
+        **_ignored: Any,
     ):
+        if signer is None:
+            raise ValueError(
+                "AsyncAndroidTransport requires a signer (RemoteSigner). "
+                "Use tiktokflow.TikTokAPI(api_key=..., signing_server=...) "
+                "to construct a client with a wired-up signer."
+            )
         self.device = device
+        self._remote_signer = signer
         self.base_url = base_url.rstrip("/")
         self.max_retries = max_retries
         self.full_sign = full_sign
@@ -56,7 +64,6 @@ class AsyncAndroidTransport:
         self._proxy_rotate = proxy_rotate
         self._proxy_index = 0
 
-        # Build proxy list: explicit list takes priority over single proxy.
         if proxies:
             self._proxy_list: list[str] = list(proxies)
         elif proxy:
@@ -64,7 +71,6 @@ class AsyncAndroidTransport:
         else:
             self._proxy_list = []
 
-        # Client pool keyed by proxy URL (None = direct connection).
         self._clients: dict[str | None, httpx.AsyncClient] = {}
         if client is not None:
             self._clients[None] = client
@@ -76,7 +82,6 @@ class AsyncAndroidTransport:
             else:
                 self._clients[None] = httpx.AsyncClient(**kw)
 
-        # Rate limiter.
         if rate_limiter is not None:
             self.rate_limiter = rate_limiter
         elif rate_limit is not None:
@@ -89,12 +94,10 @@ class AsyncAndroidTransport:
     # ------------------------------------------------------------------
 
     def set_proxy(self, proxy: str | None) -> None:
-        """Set a single proxy (or *None* to go direct)."""
         self._proxy_list = [proxy] if proxy else []
         self._proxy_index = 0
 
     def set_proxies(self, proxies: list[str]) -> None:
-        """Replace the proxy rotation list at runtime."""
         self._proxy_list = list(proxies)
         self._proxy_index = 0
 
@@ -123,7 +126,6 @@ class AsyncAndroidTransport:
 
     @property
     def _client(self) -> httpx.AsyncClient:
-        """Return the first available client (for tests / compat)."""
         if None in self._clients:
             return self._clients[None]
         return next(iter(self._clients.values()))
@@ -137,6 +139,45 @@ class AsyncAndroidTransport:
 
     async def __aexit__(self, *exc):
         await self.close()
+
+    # ------------------------------------------------------------------
+    # Hosted signing (run sync RemoteSigner in a thread)
+    # ------------------------------------------------------------------
+
+    async def _sign_and_guard(
+        self,
+        *,
+        query_string: str,
+        body: bytes | None,
+        path: str,
+        method: str,
+        use_full_sign: bool,
+    ) -> tuple[dict[str, str], int]:
+        api_path = path.split("?")[0] if "?" in path else path
+
+        def _call() -> tuple[dict[str, str], int]:
+            return self._remote_signer.sign(
+                query_string=query_string,
+                body=body,
+                cookie_string=self.device.cookie_string(),
+                path=api_path,
+                method=method,
+                full_sign=use_full_sign,
+                device_id=self.device.device_id,
+                install_id=self.device.install_id,
+                device_type=self.device.device_type,
+                device_brand=self.device.device_brand,
+                channel=self.device.channel,
+                app_version=self.device.app_version,
+                version_code=self.device.version_code,
+                manifest_version_code=self.device.manifest_version_code,
+                device_token=self.device.device_token,
+                dtoken_sign=self.device.dtoken_sign,
+                token=self.device.token,
+                ts_sign=self.device.ts_sign,
+            )
+
+        return await asyncio.to_thread(_call)
 
     # ------------------------------------------------------------------
     # Core request
@@ -180,22 +221,18 @@ class AsyncAndroidTransport:
             else:
                 body_bytes = urlencode(data).encode()
 
-        ts = round(time.time())
         use_full_sign = self.full_sign if full_sign is None else full_sign
-        if use_full_sign:
-            sign_headers = sign_request_full(
-                self.device,
-                query_string=query_string,
-                body=body_bytes,
-                ts=ts,
-            )
-        else:
-            sign_headers = sign_request(
-                query_string=query_string,
-                body=body_bytes,
-                cookie_string=self.device.cookie_string(),
-                ts=ts,
-            )
+        api_path = path.split("?")[0] if "?" in path else path
+        if not api_path.startswith("/"):
+            from urllib.parse import urlparse
+            api_path = urlparse(api_path).path
+        sign_headers, _ts = await self._sign_and_guard(
+            query_string=query_string,
+            body=body_bytes,
+            path=api_path,
+            method=method,
+            use_full_sign=use_full_sign,
+        )
 
         hdrs: dict[str, str] = dict(self.device.headers())
         hdrs.update(sign_headers)
@@ -258,3 +295,7 @@ class AsyncAndroidTransport:
             await asyncio.sleep(retry_after)
             return
         await asyncio.sleep(min(8.0, 0.5 * (2 ** attempt)) + random.random() * 0.25)
+
+
+# Suppress "imported but unused" lint for symbols we re-export via transport.
+_ = (AuthError, InvalidRequest)

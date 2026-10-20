@@ -53,6 +53,19 @@ class SearchAPI:
             "count": count,
         })
 
+    def users(
+        self,
+        keyword: str,
+        *,
+        offset: int = 0,
+        count: int = 10,
+    ) -> dict[str, Any]:
+        """/aweme/v1/general/search/single/ — search users."""
+        res = self.general(keyword, offset=offset, count=count)
+        if res.get("data"):
+            return res
+        return self.user_suggestions(keyword, count=count)
+
     def videos(
         self,
         keyword: str,
@@ -85,6 +98,16 @@ class SearchAPI:
     def hashtag_search(self, keyword: str, *, offset: int = 0, count: int = 10) -> dict[str, Any]:
         """/aweme/v1/challenge/search/"""
         return self._t.get(f"{SEARCH_BASE}/aweme/v1/challenge/search/", params={
+            "keyword": keyword,
+            "offset": offset,
+            "count": count,
+        })
+
+    hashtags = hashtag_search
+
+    def music(self, keyword: str, *, offset: int = 0, count: int = 10) -> dict[str, Any]:
+        """/aweme/v1/music/search/"""
+        return self._t.get(f"{SEARCH_BASE}/aweme/v1/music/search/", params={
             "keyword": keyword,
             "offset": offset,
             "count": count,

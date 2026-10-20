@@ -73,22 +73,8 @@ class MusicAPI:
         }, full_sign=True)
 
     def recommended(self, *, cursor: int = 0, count: int = 20) -> dict[str, Any]:
-        """/aweme/v1/music/choices/ — recommended music list (video-creation music picker).
-
-        ``/aweme/v1/music/list/`` (the old path) is DEPRECATED server-side:
-        live probing (2026-08-26) found it returns status_code=4 "Server is
-        currently unavailable" for every param combination tried (no params,
-        ``music_list_type``, ``scene``, ``type``), while sibling paths like
-        ``/aweme/v1/commerce/music/list/`` give the same code=4 and
-        ``/aweme/v1/original/music/list/`` gives a different error
-        (status_code=5, so it exists but wants other params — it's for a
-        creator's original-sound catalog, not general recommendations).
-        ``/aweme/v1/music/choices/`` was confirmed working with status_code=0
-        and a populated ``music_list`` using the same cursor/count params —
-        it's the music panel used when creating a video.
-        ``/aweme/v1/music/beats/songs/`` also works with the same shape and
-        is a viable alternative if ``choices`` is later restricted."""
-        return self._t.get("/aweme/v1/music/choices/", params={
+        """/aweme/v1/music/list/ — recommended music list."""
+        return self._t.get("/aweme/v1/music/list/", params={
             "cursor": cursor,
             "count": count,
         })

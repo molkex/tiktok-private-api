@@ -1,12 +1,17 @@
 """tiktok-private-api — Unofficial TikTok Private API SDK for Python."""
+import os
+
 from .errors import TikTokError, AuthError, RateLimitError, InvalidRequest, ServerError
 
-__version__ = "0.4.3"
+__version__ = "0.4.4"
+
+SIGNING_SERVER_ENV = "TIKTOKFLOW_SIGNING_SERVER"
+
 
 def TikTokAPI(
     api_key: str,
     *,
-    signing_server: str = "http://151.80.58.79:8642",
+    signing_server: str | None = None,
     platform: str = "android",
     proxy: str | None = None,
     proxies: list[str] | None = None,
@@ -18,8 +23,9 @@ def TikTokAPI(
     """Create a TikTok API client.
 
     Args:
-        api_key: Signing server API key (get at tiktok-private-api.com)
-        signing_server: Signing server URL (default: official server)
+        api_key: Signing server API key
+        signing_server: Signing server URL; falls back to the
+            TIKTOKFLOW_SIGNING_SERVER environment variable
         platform: "android" or "ios"
         proxy: SOCKS5/HTTP proxy URL
         proxies: List of proxy URLs for rotation
@@ -29,6 +35,12 @@ def TikTokAPI(
     """
     from .android.remote_signer import RemoteSigner
     from .android.device import Device
+
+    signing_server = signing_server or os.environ.get(SIGNING_SERVER_ENV)
+    if not signing_server:
+        raise ValueError(
+            f"signing_server is required (pass it or set {SIGNING_SERVER_ENV})"
+        )
 
     if device is None:
         device = Device()

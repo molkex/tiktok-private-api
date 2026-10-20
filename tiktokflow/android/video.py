@@ -13,7 +13,9 @@
 /aweme/v1/data/insighs/ — creator video analytics/insights (retention curve,
     like distribution, follower/live history). TikTok's own typo in the path
     ("insighs") and in one JSON field ("distrubution") — verified against
-    v46, not our bug."""
+    v46, not our bug.
+/tiktok/user/top_item/create/v1/, /tiktok/user/top_item/delete/v1/ — pin/
+    unpin a video to the top of your own profile."""
 from __future__ import annotations
 
 import json
@@ -253,6 +255,56 @@ class VideoAPI:
         return self._t.get("/aweme/v2/data/insight", params={
             "type_requests": type_requests,
         })
+
+    # ── pin (top) video on own profile ───────────────────────────────
+    # Confirmed via static string extraction (work/all_strings.txt) — the
+    # literal path constants "/tiktok/user/top_item/create/v1/" and
+    # "/tiktok/user/top_item/delete/v1/" both exist verbatim, and the
+    # profile/aweme response schema carries "is_top_item"/"top_item" field
+    # names elsewhere in the same string table, matching TikTok's own
+    # internal name for "pin to top of profile".
+
+    def pin(self, aweme_id: str) -> dict[str, Any]:
+        """/tiktok/user/top_item/create/v1/ — pin one of your own videos to
+        the top of your profile.
+
+        VERIFIED live against the emulator (@1232140499y, v46): POST with
+        {item_id: aweme_id} reaches real business logic and returns a
+        stable status_code=4 "status_code=13 code=13" for both of this
+        account's own videos — NOT the gateway false-positive trap (GET on
+        the same path returns the trap's status_code=0/"url doesn't match"
+        with no other keys; this only responds over POST, and code=13 is
+        specific/reproducible, unlike the trap's generic code=0). The field
+        name matters: {aweme_id: ...} instead of {item_id: ...} returns
+        "Invalid parameters code=5" (rejected before reaching business
+        logic) — item_id is confirmed correct.
+
+        Could not observe a real success response: code=13 was reproduced
+        against both aweme_ids this account owns, and comment.publish()
+        against the same two videos separately returns "This video does
+        not exist code=2209" — both symptoms point at these being
+        synthetic/placeholder seed videos on this throwaway account rather
+        than a problem with this method's request shape. code=13's exact
+        meaning (ineligible video, pin-limit reached, or something else)
+        is unconfirmed."""
+        return self._t.post("/tiktok/user/top_item/create/v1/", params={
+            "item_id": aweme_id,
+        }, write=True, full_sign=True)
+
+    def unpin(self, aweme_id: str) -> dict[str, Any]:
+        """/tiktok/user/top_item/delete/v1/ — unpin a previously pinned
+        video.
+
+        VERIFIED live: {item_id: aweme_id} against this account's own
+        (never-actually-pinned, per pin()'s code=13) video returned
+        status_code=0 with no error — a real success response, not the
+        gateway trap (trap only fires over GET; this only responds over
+        POST). Like unrepost()/collect() elsewhere in this codebase,
+        unpin() appears unconditionally successful even when nothing was
+        pinned."""
+        return self._t.post("/tiktok/user/top_item/delete/v1/", params={
+            "item_id": aweme_id,
+        }, write=True, full_sign=True)
 
     def related(self, aweme_id: str, *, count: int = 6) -> dict[str, Any]:
         """/aweme/v1/feed/ with type=5 — "related/you may like" videos for

@@ -1,18 +1,28 @@
-"""Device registration: obtain real device_id / install_id from TikTok.
+"""Device registration against TikTok (public, hosted-signing).
 
-Calls POST /service/2/device_register/ on log.snssdk.com with a TTEncrypt-
-encrypted payload.  Returns a Device instance with server-assigned IDs.
+The /service/2/device_register/ body is a TTEncrypt-wrapped blob, and
+TTEncrypt is part of the signing algorithm — it only runs server-side,
+inside the hosted signing service. This module therefore delegates both
+the body encryption and the request signing to :class:`RemoteSigner`
+(via its ``register()`` entry point) and performs just the HTTP POST
+locally.
 
-Usage:
-    device = register_device()                       # sync
-    device = await register_device_async()           # async
-    device = register_device(device=my_seed_device)  # bring your own seed
+Usage::
+
+    from tiktokflow.android.remote_signer import RemoteSigner
+    from tiktokflow.android.register import register_device
+
+    signer = RemoteSigner("https://sign.example.com", "sk_...")
+    device = register_device(signer=signer)
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import random
 import time
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 
@@ -21,18 +31,15 @@ from .device import (
     DEVICE_REGISTER_URL,
     TIKTOK_AID,
     TIKTOK_APP_NAME,
-    TIKTOK_APP_VERSION,
-    TIKTOK_CHANNEL,
-    TIKTOK_VERSION_CODE,
-    TIKTOK_MANIFEST_VERSION_CODE,
 )
-from .signing import sign_request
-from .ttencrypt import tt_encrypt
 
 TIKTOK_PACKAGE = "com.zhiliaoapp.musically"
-
-# Fixed values matching what a real TikTok Android client sends.
 _SIG_HASH = "aea615ab910015038f73c47e45d21466"
+
+_HOSTED_HINT = (
+    "register_device requires a RemoteSigner — TTEncrypt and the signing "
+    "algorithm run server-side only. Pass signer=RemoteSigner(url, api_key)."
+)
 
 
 def _build_register_payload(device: Device) -> dict[str, Any]:
@@ -64,23 +71,25 @@ def _build_register_payload(device: Device) -> dict[str, Any]:
             "openudid": device.openudid,
             "cdid": device.cdid,
             "clientudid": device.clientudid,
-            "resolution": device.resolution.replace("x", "*"),
+            "resolution": device.resolution_qs,
             "dpi": device.dpi,
-            "timezone": -4,
-            "timezone_name": "America/New_York",
-            "timezone_offset": -14400,
-            "carrier": device.carrier or "",
-            "mcc_mnc": "",
+            "timezone": device.timezone_offset // 3600,
+            "timezone_name": device.timezone_name,
+            "timezone_offset": device.timezone_offset,
+            "carrier": device.carrier,
+            "mcc_mnc": device.mcc_mnc,
             "locale": f"{device.language}_{device.region}",
             "app_language": device.language,
             "sys_region": device.region,
             "carrier_region": device.region,
             "not_request_sender": 0,
-            "rom": "unknown",
-            "rom_version": "",
+            "rom": device.rom or "unknown",
+            "rom_version": device.rom_version,
+            "cpu_abi": device.cpu_abi,
+            "host_abi": device.cpu_abi,
             "sig_hash": _SIG_HASH,
             "gaid_limited": 0,
-            "google_aid": "",
+            "google_aid": device.google_aid,
             "ac": "wifi",
             "_gen_i": 1,
         },
@@ -89,7 +98,6 @@ def _build_register_payload(device: Device) -> dict[str, Any]:
 
 
 def _build_query_params(device: Device) -> dict[str, str]:
-    """Query-string params sent alongside the registration POST."""
     ts_ms = str(int(time.time() * 1000))
     return {
         "aid": TIKTOK_AID,
@@ -97,61 +105,57 @@ def _build_query_params(device: Device) -> dict[str, str]:
         "version_code": device.version_code,
         "version_name": device.app_version,
         "manifest_version_code": device.manifest_version_code,
+        "update_version_code": device.manifest_version_code,
         "channel": device.channel,
         "device_type": device.device_type,
         "device_brand": device.device_brand,
         "device_platform": "android",
+        "os": "android",
         "os_version": device.os_version,
         "os_api": device.os_api,
-        "resolution": device.resolution,
+        "resolution": device.resolution_qs,
         "dpi": str(device.dpi),
         "language": device.language,
         "region": device.region,
         "carrier_region": device.region,
         "app_language": device.language,
         "sys_region": device.region,
-        "timezone_name": "America/New_York",
-        "timezone_offset": "-14400",
+        "timezone_name": device.timezone_name,
+        "timezone_offset": str(device.timezone_offset),
         "ac": "wifi",
         "openudid": device.openudid,
         "cdid": device.cdid,
         "uuid": device.openudid,
+        "mcc_mnc": device.mcc_mnc,
+        "carrier_region_v2": device.carrier_region_v2,
         "_rticket": ts_ms,
         "ts": str(int(time.time())),
     }
 
 
 def _make_seed_device() -> Device:
-    """Create a seed Device with random fingerprint params but no real IDs."""
-    return Device(
-        device_id="0",
-        install_id="0",
-        iid="0",
-    )
+    return Device(device_id="0", install_id="0", iid="0")
 
 
 def _sign_and_build_request(
     device: Device,
+    signer: Any,
 ) -> tuple[str, bytes, dict[str, str]]:
-    """Prepare full URL, body, and headers for the registration request."""
-    from urllib.parse import urlencode
+    """Ask the signing server to TTEncrypt the body and sign the request."""
+    if signer is None or not hasattr(signer, "register"):
+        raise RuntimeError(_HOSTED_HINT)
 
     payload = _build_register_payload(device)
     payload_json = json.dumps(payload, separators=(",", ":"))
-
-    # TTEncrypt the JSON payload
-    body = tt_encrypt(payload_json.encode())
 
     params = _build_query_params(device)
     query_string = urlencode(params)
     full_url = f"{DEVICE_REGISTER_URL}?{query_string}"
 
-    ts = round(time.time())
-    sign_headers = sign_request(
+    body, sign_headers, _ts = signer.register(
+        payload_json=payload_json,
         query_string=query_string,
-        body=body,
         cookie_string=device.cookie_string(),
-        ts=ts,
     )
 
     headers = dict(device.headers())
@@ -162,30 +166,64 @@ def _sign_and_build_request(
     return full_url, body, headers
 
 
+_COOKIE_TO_ATTR: dict[str, str] = {
+    "ttreq": "ttreq",
+    "odin_tt": "odin_tt",
+    "ttwid": "ttwid",
+    "msToken": "msToken",
+    "d_ticket": "d_ticket",
+    "cmpl_token": "cmpl_token",
+    "store-country-code": "store_country_code",
+    "passport_csrf_token": "passport_csrf_token",
+    "sessionid": "session_id",
+    "sid_tt": "sid_tt",
+    "uid_tt": "uid_tt",
+    "sid_guard": "sid_guard",
+    "multi_sids": "multi_sids",
+    "sid_ucp_v1": "sid_ucp_v1",
+    "ssid_ucp_v1": "ssid_ucp_v1",
+}
+
+
+def parse_all_cookies(resp: httpx.Response) -> dict[str, str]:
+    """Return {cookie_name: cookie_value} for every Set-Cookie header."""
+    cookies: dict[str, str] = {}
+    for cookie_str in resp.headers.get_list("set-cookie"):
+        name_val = cookie_str.split(";")[0].strip()
+        if "=" in name_val:
+            name, _, val = name_val.partition("=")
+            cookies[name.strip()] = val.strip()
+    return cookies
+
+
+def persist_register_cookies(resp: httpx.Response, device: Device) -> dict[str, str]:
+    """Persist every known cookie from a device_register response onto Device."""
+    cookies = parse_all_cookies(resp)
+    for cookie_name, value in cookies.items():
+        attr = _COOKIE_TO_ATTR.get(cookie_name)
+        if attr and value:
+            setattr(device, attr, value)
+    return cookies
+
+
 def _parse_register_response(resp: httpx.Response, device: Device) -> Device:
-    """Parse the server response and update the Device with real IDs."""
     if resp.status_code != 200:
         raise RuntimeError(
-            f"device_register failed: HTTP {resp.status_code} "
-            f"{resp.text[:300]}"
+            f"device_register failed: HTTP {resp.status_code} {resp.text[:300]}"
         )
 
     data = resp.json()
-
-    # The response may have device_id_str / install_id_str (string) or
-    # device_id / install_id (int).  Handle both.
     device_id = data.get("device_id_str") or str(data.get("device_id", 0))
     install_id = data.get("install_id_str") or str(data.get("install_id", 0))
 
     if device_id in ("0", "", "None", None):
         raise RuntimeError(
-            f"device_register returned no device_id: "
-            f"{json.dumps(data)[:300]}"
+            f"device_register returned no device_id: {json.dumps(data)[:300]}"
         )
 
-    device.device_id = device_id
-    device.install_id = install_id
-    device.iid = install_id
+    device.device_id = str(device_id)
+    device.install_id = str(install_id)
+    device.iid = str(install_id)
     device.device_token = data.get("device_token", "")
 
     for cookie_str in resp.headers.get_list("set-cookie"):
@@ -201,61 +239,116 @@ def _parse_register_response(resp: httpx.Response, device: Device) -> Device:
 
 def register_device(
     *,
+    signer: Any | None = None,
     device: Device | None = None,
+    proxy: str | None = None,
+    proxies: list[str] | None = None,
     timeout: float = 30.0,
+    max_retries: int = 4,
+    client: httpx.Client | None = None,
+    persist_cookies: bool = False,
 ) -> Device:
-    """Register a new device with TikTok (synchronous).
+    """Register a fresh device with TikTok (sync).
 
     Args:
-        device:  Optional seed Device. If omitted a random one is generated.
+        signer: ``RemoteSigner`` (required — TTEncrypt and signing run
+            server-side).
+        device: Optional seed Device; a fresh one is generated otherwise.
+        proxy / proxies: HTTP/SOCKS5 proxies.
         timeout: HTTP timeout in seconds.
+        max_retries: Retries on flaky server responses.
+        client: Optional persistent ``httpx.Client``.
+        persist_cookies: If True, persist all Set-Cookie headers to Device.
 
     Returns:
-        The same Device instance, updated with real device_id / install_id.
-
-    Raises:
-        RuntimeError: registration failed (HTTP error or missing device_id).
+        The Device, with server-assigned device_id, install_id, device_token.
     """
-    d = device or _make_seed_device()
-    url, body, headers = _sign_and_build_request(d)
+    if signer is None:
+        raise ValueError(_HOSTED_HINT)
 
-    with httpx.Client(timeout=timeout) as client:
-        resp = client.post(url, content=body, headers=headers)
+    last_err: Exception | None = None
+    for attempt in range(max_retries):
+        if device is not None:
+            d = device if attempt == 0 else Device(
+                device_id="0", install_id="0", iid="0",
+                region=device.region, language=device.language,
+            )
+        else:
+            d = _make_seed_device()
+        url, body, headers = _sign_and_build_request(d, signer=signer)
 
-    return _parse_register_response(resp, d)
+        try:
+            if client is not None:
+                resp = client.post(url, content=body, headers=headers)
+            else:
+                client_kwargs: dict[str, Any] = {"timeout": timeout}
+                sel_proxy = proxy or (random.choice(proxies) if proxies else None)
+                if sel_proxy:
+                    client_kwargs["proxy"] = sel_proxy
+                with httpx.Client(**client_kwargs) as c:
+                    resp = c.post(url, content=body, headers=headers)
+            result = _parse_register_response(resp, d)
+            if persist_cookies:
+                persist_register_cookies(resp, d)
+            return result
+        except RuntimeError as e:
+            last_err = e
+            if attempt < max_retries - 1:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            raise
+
+    raise last_err or RuntimeError("device_register failed")
 
 
 async def register_device_async(
     *,
+    signer: Any | None = None,
     device: Device | None = None,
+    proxy: str | None = None,
+    proxies: list[str] | None = None,
     client: httpx.AsyncClient | None = None,
     timeout: float = 30.0,
+    max_retries: int = 4,
 ) -> Device:
-    """Register a new device with TikTok (async).
+    """Register a fresh device with TikTok (async)."""
+    if signer is None:
+        raise ValueError(_HOSTED_HINT)
 
-    Args:
-        device:  Optional seed Device. If omitted a random one is generated.
-        client:  Optional reusable httpx.AsyncClient.
-        timeout: HTTP timeout in seconds.
+    last_err: Exception | None = None
+    for attempt in range(max_retries):
+        if device is not None:
+            d = device if attempt == 0 else Device(
+                device_id="0", install_id="0", iid="0",
+                region=device.region, language=device.language,
+            )
+        else:
+            d = _make_seed_device()
+        url, body, headers = await asyncio.to_thread(
+            _sign_and_build_request, d, signer,
+        )
 
-    Returns:
-        The same Device instance, updated with real device_id / install_id.
+        close_client = False
+        sel_client = client
+        if sel_client is None:
+            client_kwargs: dict[str, Any] = {"timeout": timeout}
+            sel_proxy = proxy or (random.choice(proxies) if proxies else None)
+            if sel_proxy:
+                client_kwargs["proxy"] = sel_proxy
+            sel_client = httpx.AsyncClient(**client_kwargs)
+            close_client = True
 
-    Raises:
-        RuntimeError: registration failed (HTTP error or missing device_id).
-    """
-    d = device or _make_seed_device()
-    url, body, headers = _sign_and_build_request(d)
+        try:
+            resp = await sel_client.post(url, content=body, headers=headers)
+            return _parse_register_response(resp, d)
+        except RuntimeError as e:
+            last_err = e
+            if attempt < max_retries - 1:
+                await asyncio.sleep(0.5 * (attempt + 1))
+                continue
+            raise
+        finally:
+            if close_client:
+                await sel_client.aclose()
 
-    close_client = False
-    if client is None:
-        client = httpx.AsyncClient(timeout=timeout)
-        close_client = True
-
-    try:
-        resp = await client.post(url, content=body, headers=headers)
-    finally:
-        if close_client:
-            await client.aclose()
-
-    return _parse_register_response(resp, d)
+    raise last_err or RuntimeError("device_register failed")

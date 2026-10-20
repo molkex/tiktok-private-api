@@ -24,7 +24,7 @@ class CommentAPI:
         count: int = 20,
         web_fallback: bool = True,
     ) -> dict[str, Any]:
-        """/aweme/v2/comment/list/ with web API fallback for v46.4.3 version gate."""
+        """/aweme/v2/comment/list/ with web API fallback for v46.7.3 version gate."""
         result = self._t.get("/aweme/v2/comment/list/", params={
             "aweme_id": aweme_id,
             "cursor": cursor,
@@ -101,3 +101,37 @@ class CommentAPI:
             "comment_id": comment_id,
             "digg_type": digg_type,
         }, content=body, write=True, full_sign=True)
+
+    def pin(self, aweme_id: str, comment_id: str, *, op: int = 1) -> dict[str, Any]:
+        """/tiktok/comment/pin/v1 — creator pins (op=1) or unpins (op=2) a
+        top comment on their own video.
+
+        VERIFIED live against the emulator (@1232140499y, v46): path exists
+        and reaches real business logic (not the gateway false-positive
+        trap — that returns status_code=0/"url doesn't match" with no other
+        keys, over GET; this endpoint only accepts POST and returns
+        status_code=4). Field names were determined by live probing:
+        {aweme_id, comment_id, action} → status_code=4 "Invalid parameters
+        code=5" (wrong field names, rejected before reaching business
+        logic); {item_id, comment_id, op=1 or op=2} → status_code=4
+        "Server is currently unavailable code=4" reproducibly, INCLUDING
+        against a garbage item_id, i.e. this is TikTok's generic masked
+        "comment not found" response, not a real server outage — the
+        request format itself is accepted. {item_id, comment_id, op=0} was
+        rejected as "Invalid parameters", confirming op is a 1/2 enum
+        (pin/unpin), not a 1/0 toggle like this file's digg().
+
+        Could not be verified end-to-end with a real success response: the
+        two videos on this test account both return "This video does not
+        exist code=2209" from comment.publish(), so no real comment_id to
+        pin was obtainable in this session."""
+        from urllib.parse import urlencode as _ue
+        body = _ue({"item_id": aweme_id, "comment_id": comment_id, "op": str(op)}).encode()
+        return self._t.post("/tiktok/comment/pin/v1", params={
+            "item_id": aweme_id,
+            "comment_id": comment_id,
+            "op": op,
+        }, content=body, write=True, full_sign=True)
+
+    def unpin(self, aweme_id: str, comment_id: str) -> dict[str, Any]:
+        return self.pin(aweme_id, comment_id, op=2)

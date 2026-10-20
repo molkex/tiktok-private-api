@@ -1,90 +1,16 @@
 # tiktok-private-api
 
-**Unofficial TikTok mobile API SDK for Python.** Talks to the same private
-endpoints the real Android/iOS app uses — feed, profiles, search, comments,
-likes, follows, uploads — with full request signing (X-Argus / X-Ladon /
-X-Gorgon / X-Khronos). **No TikTok for Developers account, no OAuth, no app
-review, no `SELF_ONLY` limit.** You drive a real logged-in session, not the
-throttled official API.
+## What it is
 
-> This is a reverse-engineering / automation toolkit. Use it on accounts and
-> data you are authorized to access.
-
-> **Companion Project**: Looking for Instagram & Threads automation?
-> Check out [instagram-private-api](https://github.com/molkex/instagram-private-api) — Pure HTTP/2 zero-device mobile protocol, warmup engine, direct messaging, and Threads radar.
-
----
-
-## Why this instead of the official API
-
-| | Official TikTok API | **tiktok-private-api** |
-|---|---|---|
-| Developer account / app review | required | **not needed** |
-| `client_key` / `client_secret` | required | **not needed** |
-| Reading feed, other users, search | ❌ not exposed | ✅ |
-| Likes / comments / follows / blocks | ❌ | ✅ |
-| Public posting (not just `SELF_ONLY`) | after review only | ✅ |
-| Rate limits | tight, per-app | per-account, mobile-grade |
-
-The official Content Posting / Display API only lets you touch *your own*
-connected account in a sandbox. This SDK speaks the mobile protocol, so it does
-what the app does.
-
-## Features
-
-- **Full mobile signing** — X-Argus, X-Ladon, X-Gorgon, X-Khronos, device
-  fingerprint, auto device registration.
-- **Android + iOS** — one API surface (`AndroidClient` / `IOSClient`), the iOS
-  layer overrides device params + Safari TLS impersonation.
-- **160+ endpoints across 14 modules** — feed, user, video, search, comment,
-  social (like/follow/block), music, notice, live, dm, effect, upload, passport.
-- **Reliable engagement writes** — like, comment, follow, block, collect routed
-  through the device's own TTNet/QUIC stack to pass server-side checks (Janus/SC).
-- **Session-based auth** — extract a logged-in session from an emulator or
-  jailbroken device; no password handling in the SDK.
-- **Extras** — async client, multi-account fleet with cooldown/ban tracking,
-  web-scraping fallbacks, proxy rotation, MCP server.
-
-## Quick start
-
-Request signing runs on our hosted service — you just need an API key. No
-device, no local signing setup to maintain.
-
-```python
-from tiktokflow import TikTokAPI
-
-tt = TikTokAPI(api_key="sk_...")        # get a key — see "Get access" below
-
-me   = tt.user.profile_self()
-feed = tt.feed.for_you(count=10)
-tt.social.like(feed["aweme_list"][0]["aweme_id"])
-tt.social.follow(feed["aweme_list"][0]["author"]["uid"])
-tt.comment.publish(feed["aweme_list"][0]["aweme_id"], "🔥")
-```
-
-```python
-# iOS device profile, proxy rotation, rate limiting — one call:
-tt = TikTokAPI(api_key="sk_...", platform="ios",
-               proxies=["socks5://user:pass@host:port"], rate_limit=2.0)
-```
-
-## Endpoint modules
-
-| Module | What it covers |
-|--------|----------------|
-| `feed` | For You, Following, Friends, Nearby |
-| `user` | profiles, followers/following, edit profile (name/bio/username/avatar), privacy settings, block list, account status |
-| `video` | detail, my posts, favorites, collections, stats, insights/analytics, delete |
-| `search` | universal / video / user search, suggestions, trending, hashtags |
-| `comment` | list, replies, publish, delete, digg |
-| `social` | follow, like, block, dislike, friend list, digg list, recommend users |
-| `music` | detail, videos by track, search, trending, collections |
-| `notice` | notifications, unread count, inbox |
-| `effect` | sticker/effect detail, videos by effect |
-| `live` | search, room info, gifts |
-| `dm` | conversations, messages, send, stranger inbox |
-| `passport` | all login (email/phone/username+pass, code, QR, OAuth), registration, password reset, token refresh |
-| `upload` | video + photo-carousel upload and publish |
+An open-source Python SDK for the private TikTok mobile API — the same
+endpoints the Android and iOS apps use for feed, profiles, video, comments,
+likes, follows, uploads, DMs, search, music, live and notifications. The hard
+part — request signing (X-Argus / X-Ladon / X-Gorgon / X-Khronos / device
+fingerprint) — is **not** done in this package. Instead, the client makes a
+small call to a hosted signing service with your API key, gets back the
+signature headers for that one request, and then sends the actual TikTok
+request from your own machine. **Your HTTP requests to TikTok leave your IP,
+not ours.** We never see request bodies or responses.
 
 ## Install
 
@@ -92,21 +18,131 @@ tt = TikTokAPI(api_key="sk_...", platform="ios",
 pip install tiktok-private-api
 ```
 
-## How it works
+> **Known issue:** version `0.4.3` currently on PyPI has an import bug and
+> fails to load (`ModuleNotFoundError` on first `import tiktokflow`). A fixed
+> `0.4.4` is being prepared — pin to it once released. In the meantime, use
+> `0.3.0` (`pip install tiktok-private-api==0.3.0`).
 
-Mobile request signing (X-Argus / X-Ladon / X-Gorgon / device fingerprint) is
-the hard part that breaks every few app updates. We run it as a managed service:
-your client sends the request, our signing server returns valid headers, TikTok
-accepts it. You get a stable API and never touch signing internals — they're
-kept server-side, not shipped in this package.
+## Quickstart
 
-## Get access
+Sync:
 
-API keys, pricing, higher-volume plans, and custom work:
-**[@mxmtkchk](https://t.me/mxmtkchk)** on Telegram.
+```python
+from tiktokflow import TikTokAPI
 
-## Disclaimer
+tt = TikTokAPI(api_key="sk_live_...")
 
-Not affiliated with or endorsed by TikTok / ByteDance. Provided for research and
-automation on authorized accounts. You are responsible for complying with
-TikTok's terms and applicable law.
+me   = tt.user.profile_self()
+feed = tt.feed.for_you(count=10)
+first = feed["aweme_list"][0]
+tt.social.like(first["aweme_id"])
+tt.comment.publish(first["aweme_id"], "nice")
+```
+
+Async:
+
+```python
+import asyncio
+from tiktokflow.android.async_client import AsyncAndroidClient
+from tiktokflow.android.remote_signer import RemoteSigner
+from tiktokflow.android.device import Device
+
+async def main():
+    signer = RemoteSigner("https://sign.example", api_key="sk_live_...")
+    async with AsyncAndroidClient(Device(), signer=signer) as tt:
+        feed = await tt.feed.for_you(count=10)
+        print(len(feed["aweme_list"]))
+
+asyncio.run(main())
+```
+
+## How to get a key
+
+1. Open [`@lazymanagerrobot`](https://t.me/lazymanagerrobot) on Telegram.
+2. Send `/key`.
+3. The bot replies with your personal API key (shown once — save it).
+
+Keys are **free** right now. A paid tier is planned later; it will be a
+single flag flip on the server, so your code will not change — only the
+rate-limit numbers.
+
+## What we see on our side
+
+The signing service receives: your API key, the TikTok endpoint path, and the
+request parameters that have to be included in the signature. For
+accounting and abuse protection it keeps, per key:
+
+- which endpoints were called,
+- counts and timestamps,
+- the HTTP status code TikTok returned.
+
+What it **does not** log:
+
+- request bodies,
+- response bodies,
+- TikTok user IDs / usernames / aweme IDs / cookies,
+- any TikTok content (videos, text, DMs, comments),
+- your TikTok session tokens.
+
+This is enforced in the service code: the log writers only accept the fields
+above, and request/response bodies never reach them. If you want to audit it,
+ping the maintainer on Telegram — the relevant file in the private repo can
+be shared.
+
+## Rate limits and tiers
+
+- **No monthly or daily quotas.** You pay nothing while the service is free; usage is not capped by volume.
+- **Per-key safety ceiling: 100 req/s, burst 500.** This is a crash-loop guard for the signing service itself, not a product limit — a thousand client accounts at normal activity stay well under it. If a runaway script spikes above the burst, the service answers `429` on the excess; backing off a second clears it.
+- **Paid tier (later):** no rate changes planned; the paid flag unlocks support, SLAs, and extended endpoints when they land. Same API, same key format.
+
+The limit is global per key, not per process, so running two workers does
+not double it.
+
+## Supported endpoints
+
+Twelve domain modules, exposed as `tt.<module>.<method>`:
+
+- `profile` / `user` — profiles, followers, following, edit profile, privacy, block list
+- `video` — detail, my posts, favorites, collections, stats, delete
+- `feed` — For You, Following, Friends, Nearby
+- `comment` — list, replies, publish, delete, digg
+- `dm` — conversations, messages, send, stranger inbox
+- `search` — universal / video / user search, suggestions, trending, hashtags
+- `social` — follow, like, block, dislike, friend list, digg list, recommend users
+- `upload` — video and photo-carousel upload and publish
+- `live` — search, room info, gifts
+- `music` — detail, videos by track, search, trending, collections
+- `notice` — notifications, unread count, inbox
+- `passport` — login (email / phone / username+pass / code / QR / OAuth), registration, password reset, token refresh
+
+Exact module list is pinned by `ops/release/public_manifest.txt` in the source
+repo — nothing ships to PyPI that is not in that file.
+
+## <a id="donate"></a>Donations
+
+If this SDK saves you time, a tip is appreciated.
+
+| Network | Address |
+|---|---|
+| Bitcoin (BTC) | `bc1q73j9y68g02skp7tgfx8dy22w32rjrnea0647lg` |
+| Ethereum (ETH, ERC-20) | `0xF44233bee0f73152De3ba9Ebe8d5270C25825c7D` |
+| Tron (TRX, TRC-20) | `TLmPmbg5n4BzJLCAiRREjJH1mErDQGg9BS` |
+| Solana (SOL) | `q24r8XxZ7EVHmCEzKVSPUiAsuy1FFkfrpYmyw8AWx27` |
+
+Please verify the address matches the network before sending.
+
+## Legal and attribution
+
+This is an **unofficial, reverse-engineered** client. It is not affiliated
+with, endorsed by, or sponsored by TikTok or ByteDance. "TikTok" and related
+marks belong to ByteDance Ltd. Use the SDK only on accounts and data you are
+authorised to access, and in compliance with applicable law and TikTok's
+terms of service.
+
+Licensed under the MIT License — see [`LICENSE`](LICENSE).
+
+## Links
+
+- Issues: <https://github.com/molkex/tiktok-private-api/issues>
+- Security policy: [`SECURITY.md`](SECURITY.md)
+- Key dispatcher bot: [`@lazymanagerrobot`](https://t.me/lazymanagerrobot)

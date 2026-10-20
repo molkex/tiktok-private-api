@@ -1,4 +1,9 @@
-"""High-level Android SDK client: one object, all APIs."""
+"""High-level Android SDK client (public, hosted-signing).
+
+Thin wrapper around :class:`AndroidTransport` that wires the per-endpoint
+API classes. All signing is delegated to :class:`RemoteSigner` running
+against the hosted signing service — pass one in via ``signer=``.
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -19,22 +24,16 @@ from .notice import NoticeAPI
 from .passport import PassportAPI
 from .live import LiveAPI
 from .dm import DMAPI
-from .effect import EffectAPI
-try:
-    from .activation import activate_device, ActivationResult
-    _HAS_ACTIVATION = True
-except ImportError:
-    _HAS_ACTIVATION = False
 
 
 class AndroidClient:
     """Single entry point for the Android mobile API.
 
-    Usage:
-        device = Device.load("device.json")
-        with AndroidClient(device) as tt:
-            feed = tt.feed.for_you(count=10)
-            profile = tt.user.profile_self()
+    Usage::
+
+        from tiktokflow import TikTokAPI
+        api = TikTokAPI(api_key="sk_...", signing_server="https://sign.example.com")
+        feed = api.feed.for_you(count=10)
     """
 
     def __init__(
@@ -51,13 +50,23 @@ class AndroidClient:
         proxies: list[str] | None = None,
         proxy_rotate: str = "round_robin",
         signer: Any | None = None,
-        ttnet_pid: int | None = None,
+        **_ignored: Any,
     ):
-        kwargs: dict[str, Any] = {"device": device, "timeout": timeout, "max_retries": max_retries, "full_sign": full_sign}
-        if signer is not None:
-            kwargs["signer"] = signer
-        if ttnet_pid is not None:
-            kwargs["ttnet_pid"] = ttnet_pid
+        if signer is None:
+            raise ValueError(
+                "AndroidClient requires a signer (RemoteSigner). "
+                "Use tiktokflow.TikTokAPI(api_key=..., signing_server=...) "
+                "to construct a client with a wired-up signer."
+            )
+        self._signer = signer
+
+        kwargs: dict[str, Any] = {
+            "device": device,
+            "timeout": timeout,
+            "max_retries": max_retries,
+            "full_sign": full_sign,
+            "signer": signer,
+        }
         if base_url:
             kwargs["base_url"] = base_url
         if rate_limit is not None:
@@ -85,7 +94,6 @@ class AndroidClient:
         self.passport = PassportAPI(self.transport)
         self.live = LiveAPI(self.transport)
         self.dm = DMAPI(self.transport)
-        self.effect = EffectAPI(self.transport)
 
     @property
     def is_authenticated(self) -> bool:
@@ -99,27 +107,43 @@ class AndroidClient:
         """Login with SMS code and capture session cookies."""
         return self.passport.sms_login(mobile, code)
 
-    def refresh_session(self) -> bool:
-        """Try to refresh expired session via passport/token/beat.
-        Returns True if refresh succeeded and session is valid."""
-        try:
-            result = self.passport.token_beat()
-            if isinstance(result, dict) and result.get("status_code") == 0:
-                data = result.get("data", {})
-                if data.get("token"):
-                    self.device.token = data["token"]
-                if data.get("cookies"):
-                    self.device.update_session(data, data.get("cookies", {}))
-                self.device.save_session_env()
-                return True
-        except Exception:
-            pass
-        return False
+    def register_sms(
+        self, mobile: str, code: str, *,
+        password: str | None = None, captcha: str | None = None,
+    ) -> dict[str, Any]:
+        """Register a new account with phone number and SMS code."""
+        return self.passport.mobile_register(
+            mobile, code, password=password, captcha=captcha,
+        )
+
+    def send_sms_code(
+        self, mobile: str, *, scene: str = "register",
+        captcha: str | None = None,
+    ) -> dict[str, Any]:
+        """Request SMS verification code for registration or login."""
+        return self.passport.send_sms_code(mobile, scene=scene, captcha=captcha)
+
+    def setup_totp(self) -> dict[str, Any]:
+        """Initiate TOTP enrollment (returns shared secret and URI)."""
+        return self.passport.totp_register()
+
+    def confirm_totp(self, code: str) -> dict[str, Any]:
+        """Confirm and activate TOTP using the 6-digit authenticator code."""
+        bind_res = self.passport.totp_bind_verify(code)
+        if bind_res.get("message") == "success" or \
+                bind_res.get("data", {}).get("error_code") == 0:
+            try:
+                self.passport.totp_enable_2sv()
+            except Exception:
+                pass
+        return bind_res
+
+    def set_username(self, username: str) -> dict[str, Any]:
+        """Change public account handle (@username)."""
+        return self.user.set_unique_id(username)
 
     def close(self) -> None:
         self.transport.close()
-        if self.transport._ttnet_bridge:
-            self.transport._ttnet_bridge.stop()
 
     def __enter__(self):
         return self
@@ -127,61 +151,53 @@ class AndroidClient:
     def __exit__(self, *exc):
         self.close()
 
-    def activate(self, *, timeout: float = 15.0) -> "ActivationResult":
-        """Run the full device activation sequence.
-
-        Discovers runtime host, sends dsign, runs MSSDK handshake.
-        If a runtime host is discovered, updates the transport base_url.
-        """
-        if not _HAS_ACTIVATION:
-            raise RuntimeError("activation requires the full package with signing modules")
-        result = activate_device(self.device, timeout=timeout)
-        if result.runtime_host:
-            self.transport.base_url = f"https://{result.runtime_host}"
-        return result
-
     @classmethod
     def from_file(cls, path: str | Path, **kwargs) -> "AndroidClient":
         return cls(Device.load(path), **kwargs)
 
     @classmethod
-    def from_emulator(
+    def from_session(
         cls,
+        sessionid: str,
+        cookies: dict[str, str] | str | None = None,
         *,
-        device_serial: str = "emulator-5554",
-        load_env: bool = False,
-        use_app_session: bool = True,
-        **kwargs,
+        device: Device | None = None,
+        user_id: str | None = None,
+        signer: Any | None = None,
+        **client_kwargs: Any,
     ) -> "AndroidClient":
-        """Create client connected to a running TikTok instance on an Android emulator.
+        """Build an authenticated client from an existing TikTok session.
 
-        Auto-detects TikTok PID and routes requests through the app's own TTNet
-        (Cronet) stack, bypassing Janus/SC.
-
-        When ``use_app_session`` is True (default) the client sends NO Cookie
-        header, so the emulator app's native CookieManager supplies the logged-in
-        session. Device fingerprint, session and signing are then all the app's
-        own and fully consistent — this is what makes auth reads AND SC-protected
-        writes (like/comment/follow) work reliably at ~0.8s. Requires the emulator
-        app to be logged in.
-
-        Set ``use_app_session=False`` + ``load_env=True`` to instead drive a
-        Python-side session (device-bound to whatever created it).
+        A fresh ``Device`` is minted via ``register_device`` when
+        ``device`` is not supplied, which requires a ``signer`` just like
+        the client itself.
         """
-        import subprocess
-        pid = int(subprocess.check_output(
-            ["adb", "-s", device_serial, "shell", "pidof", "com.zhiliaoapp.musically"],
-            text=True, timeout=5,
-        ).strip())
+        if not sessionid:
+            raise ValueError("from_session requires a non-empty sessionid")
 
-        device = Device()
-        if load_env and not use_app_session:
-            device.load_session_env()
-        if use_app_session:
-            # No injected cookies — let the app's native session authenticate.
-            device._raw_cookies = ""
-            device.session_id = ""
-            device.sid_tt = ""
-        kwargs.setdefault("base_url", "https://api-h2.tiktokv.com")
-        kwargs.setdefault("full_sign", True)
-        return cls(device, ttnet_pid=pid, **kwargs)
+        sign = signer or client_kwargs.get("signer")
+
+        if device is None:
+            from .register import register_device
+            device = register_device(signer=sign)
+
+        cookie_str: str | None = None
+        if isinstance(cookies, dict):
+            cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items() if v)
+        elif isinstance(cookies, str):
+            cookie_str = cookies.strip() or None
+
+        if cookie_str and "sessionid=" not in cookie_str:
+            cookie_str = f"sessionid={sessionid}; " + cookie_str
+        elif not cookie_str:
+            cookie_str = f"sessionid={sessionid}; sessionid_ss={sessionid}"
+
+        device.import_cookies(cookie_str)
+        if not device.session_id:
+            device.session_id = sessionid
+        if user_id:
+            device.user_id = str(user_id)
+
+        if signer is not None and "signer" not in client_kwargs:
+            client_kwargs["signer"] = signer
+        return cls(device, **client_kwargs)

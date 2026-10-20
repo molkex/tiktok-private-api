@@ -35,14 +35,64 @@ from typing import Any
 from .transport import AndroidTransport, _parse_aweme_envelope
 
 
+def _mix(value: str) -> str:
+    """mix_mode=1 field encoding: XOR each byte with 0x05, then lowercase hex.
+    Confirmed correct via jadx decompilation (X.C038F.LIZIZ in classes2.dex)."""
+    return "".join("%02x" % (b ^ 0x05) for b in value.encode("utf-8"))
+
+
+# RSA public keys embedded in the v46.7.3 APK (base64 DER SubjectPublicKeyInfo),
+# candidates for password encryption (RSA/ECB/OAEPWithSHA*). classes3 key is
+# co-located with /passport/user/login/ → primary passport candidate.
+RSA_KEYS = {
+    "classes3": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAi15r9zfdlMuE3zfC3ZZEA4U0ursaCpeXTw024ezGLKOVz7E+hBgbAhsONpfZ9tTqzEm+nc48hSs0gvhbWxFd8wSelqqJQhpSaVFLwC8VKA/oPDL7MAwbGfnlaAADwer4EOZ29KJFRiWWxolOvw9Vpzfrca6JvxSe87Y2buZp+z9kFxlGfUpyPpTkqh/8IuvZnQRTVnlOtZ1aV0urNjHgwj760LlCGO6Mwta82YTIrHIFO7JKhT5aXcrnrb7WnlojKtM3mNZ6q157D2fGiv+Gsule/ullOmXLvSkW0bJXCoQRnE9HxzmRKNss4ekmX3Vr+jmEcw1esSJ6V6LtY4JAeQIDAQAB",
+    "classes8_a": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmrjnhFSv3K66fyKzNJkZq2Xq5sMAcRJhRVWHFzg6mxT2lymt8O27TA5wAiFlqwdDhZDDANb6jTk87nqokFT/SOzoniGgMVauhsVdk3sVGlivrePs35o03+N7iN7ApJ4R0i8RTuSi+zidZyylFLkoR+H/guusjNxZiIhRm9g2i9/ur18dYbz/g4XoKLMsnTWBubtjAEjtzIOX6zsJqrwkfEmHgdnokvC7xQjSnE3fWulXavwNTtabXcTIa0Rn4YQWazB56kTKel4dS5zoghys5IvH1kqjte+Yu3qoitnph69jxXukSl08jQzY1aE1OP4misJ3zUKoZOvzHBR5iedhQQIDAQAB",
+    "classes8_b": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvekhb6Oaujs72xv5MW1iJqD17eE9dgUyEMPBa6RMu4yk8ByG7CeKRl4hFPa7NcF2U79EjKg4lXOh7mtoyPH87ZZSLzdPd3lk4o86saVwoNGNJDUJmYbGjj7331dJLtIw6SGbfHNUcWietWfkjA4nkw2an2d7adbHbDc3MB6G9kxtseUtlMRTYhfRBU9im3kicNv55fhFHbxfMtlaJQGMCiuP4q9ZiLp6+1JQql0UnlZXIN/GZB+/htlh9BRRZfL0bsRpXfVenzM88wB3DUmeTLBy/tPbwzzJm0J1C+Bmf8HmCjJmKNij/bCAOC2L0mSck9OPTQMUoDqPwBgzsYZfnwIDAQAB",
+}
+
+
+def encrypt_password_rsa(password: str, key_name: str = "classes3",
+                         sha: str = "sha1", *,
+                         pkcs1v15: bool = False,
+                         encoding: str = "b64") -> str:
+    """RSA encrypt the password with an embedded APK public key.
+    padding: OAEP (default) or PKCS1v15 (pkcs1v15=True).
+    encoding: 'b64' (default) or 'hex'.
+    """
+    import base64 as _b64
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding as _pad
+    key = serialization.load_der_public_key(_b64.b64decode(RSA_KEYS[key_name]))
+    if pkcs1v15:
+        pad = _pad.PKCS1v15()
+    else:
+        algo = hashes.SHA256() if sha == "sha256" else hashes.SHA1()
+        pad = _pad.OAEP(mgf=_pad.MGF1(algo), algorithm=algo, label=None)
+    ct = key.encrypt(password.encode("utf-8"), pad)
+    if encoding == "hex":
+        return ct.hex()
+    return _b64.b64encode(ct).decode()
+
+
+PASSPORT_HOST = "api-va.tiktokv.com"
+PASSPORT_BASE = f"https://{PASSPORT_HOST}"
+
+
 class PassportAPI:
     def __init__(self, transport: AndroidTransport):
         self._t = transport
 
+    @staticmethod
+    def _p(path: str) -> str:
+        """Ensure path routes to the global passport host api-va.tiktokv.com."""
+        if path.startswith("http://") or path.startswith("https://"):
+            return path
+        return f"{PASSPORT_BASE}{path}"
+
     def _login_request(self, path: str, data: dict[str, Any]) -> dict[str, Any]:
         """Send a login request, capture session cookies, update device.
         Uses skip_app_id to bypass Janus gateway on login endpoints."""
-        resp = self._t.post(path, data=data, raw=True, skip_app_id=True)
+        resp = self._t.post(self._p(path), data=data, raw=True, skip_app_id=True)
         cookies = dict(resp.cookies)
         body = _parse_aweme_envelope(resp)
         response_data = body.get("data") if isinstance(body, dict) else None
@@ -58,10 +108,12 @@ class PassportAPI:
         return self._t.get("/passport/token/beat/v2/", full_sign=True)
 
     def email_login(self, email: str, password: str) -> dict[str, Any]:
-        """/passport/email/login/ — captures session cookies."""
+        """/passport/email/login/ — captures session cookies.
+        email + password are mix_mode-encoded (XOR0x05+hex)."""
         return self._login_request("/passport/email/login/", {
+            "mix_mode": "1",
             "email": email,
-            "password": password,
+            "password": _mix(password),
             "account_sdk_source": "app",
         })
 
@@ -72,12 +124,33 @@ class PassportAPI:
             "code": code,
         })
 
-    def send_sms_code(self, mobile: str, *, scene: str = "login") -> dict[str, Any]:
-        """/passport/mobile/send_code/"""
-        return self._t.post("/passport/mobile/send_code/", data={
-            "mobile": mobile,
-            "scene": scene,
-        }, full_sign=True)
+    def send_sms_code(
+        self,
+        mobile: str,
+        *,
+        scene: str = "register",
+        type_: int | None = None,
+        captcha: str | None = None,
+    ) -> dict[str, Any]:
+        """/passport/mobile/send_code/v1/ — request SMS verification code.
+        Encodes mobile, type, unbind_exist with mix_mode=1 per decompiled C09400rGa."""
+        if type_ is None:
+            type_ = 24 if scene == "register" else 1
+        data: dict[str, Any] = {
+            "mobile": _mix(mobile),
+            "type": _mix(str(type_)),
+            "unbind_exist": _mix("0"),
+            "mix_mode": "1",
+            "is6Digits": "1",
+            "auto_read": "0",
+        }
+        if scene == "register":
+            data["check_register"] = "1"
+        elif scene == "login":
+            data["check_register"] = "0"
+        if captcha:
+            data["captcha"] = captcha
+        return self._t.post(self._p("/passport/mobile/send_code/v1/"), data=data, full_sign=True)
 
     def send_email_code(self, email: str, *, scene: str = "login") -> dict[str, Any]:
         """/passport/email/send_code/"""
@@ -159,7 +232,10 @@ class PassportAPI:
         internally (params: email|mobile|username|account, password,
         mix_mode=1, optional token/captcha/scene). username is lowercased
         before sending, matching the client."""
-        data: dict[str, Any] = {"password": password, "mix_mode": "1"}
+        # mix_mode=1: only the PASSWORD is XOR0x05+hex encoded; the login
+        # identifier is sent plaintext (server matched hex-encoded identifiers
+        # as literal usernames -> error 1011 "Account doesn't exist").
+        data: dict[str, Any] = {"password": _mix(password), "mix_mode": "1"}
         if email:
             data["email"] = email
         if mobile:
@@ -331,7 +407,14 @@ class PassportAPI:
     # REGISTRATION — phone / username; setting the login username
     # ------------------------------------------------------------------
 
-    def mobile_register(self, mobile: str, code: str, *, password: str | None = None) -> dict[str, Any]:
+    def mobile_register(
+        self,
+        mobile: str,
+        code: str,
+        *,
+        password: str | None = None,
+        captcha: str | None = None,
+    ) -> dict[str, Any]:
         """/passport/mobile/register/ — register by phone + SMS code
         (+ optional password). Send the code first via
         send_sms_code(mobile, scene="register"). Captures session cookies.
@@ -341,9 +424,16 @@ class PassportAPI:
         request-builder class wasn't located in the decompiled module.
         Params are inferred by symmetry with the confirmed
         /passport/email/register/v2/ builder (X.C0rGX.LIZJ())."""
-        data: dict[str, Any] = {"mobile": mobile, "code": code, "mix_mode": "1", "fixed_mix_mode": "1"}
+        data: dict[str, Any] = {
+            "mobile": _mix(mobile),
+            "code": _mix(code),
+            "mix_mode": "1",
+            "fixed_mix_mode": "1",
+        }
         if password:
-            data["password"] = password
+            data["password"] = _mix(password)
+        if captcha:
+            data["captcha"] = captcha
         return self._login_request("/passport/mobile/register/", data)
 
     def username_register(self, username: str, password: str) -> dict[str, Any]:
@@ -511,7 +601,7 @@ class PassportAPI:
         Verified: X.C0rGY.LIZLLL() in the APK — params: password,
         mix_mode=1."""
         return self._t.post("/passport/password/check/", data={
-            "password": password,
+            "password": _mix(password),
             "mix_mode": "1",
         }, full_sign=True)
 
@@ -531,3 +621,75 @@ class PassportAPI:
         if ticket:
             data["ticket"] = ticket
         return self._t.post("/passport/mobile/change/v1/", data=data, full_sign=True)
+
+    # ------------------------------------------------------------------
+    # TWO-STEP VERIFICATION (TOTP / Authenticator App)
+    # ------------------------------------------------------------------
+
+    def totp_status(self) -> dict[str, Any]:
+        """/passport/totp/status/ — check if TOTP authenticator is configured/active."""
+        extra_headers: dict[str, str] = {}
+        if self._t.device.passport_csrf_token:
+            extra_headers["x-tt-passport-csrf-token"] = self._t.device.passport_csrf_token
+        return self._t.get(self._p("/passport/totp/status/"), extra_headers=extra_headers, full_sign=True)
+
+    def totp_register(self, *, ticket: str | None = None) -> dict[str, Any]:
+        """/passport/totp/register/v2/ — initiate TOTP enrollment.
+        Returns the shared secret key, URI, and QR metadata for authenticator apps.
+        Verified from TwoStepAuthApi.java."""
+        data: dict[str, Any] = {
+            "aid": self._t.device.aid or "1233",
+            "device_id": self._t.device.device_id,
+        }
+        if ticket:
+            data["verify_ticket"] = ticket
+        extra_headers: dict[str, str] = {}
+        if self._t.device.passport_csrf_token:
+            extra_headers["x-tt-passport-csrf-token"] = self._t.device.passport_csrf_token
+        return self._t.post(self._p("/passport/totp/register/v2/"), data=data, extra_headers=extra_headers, full_sign=True)
+
+    def totp_bind_verify(self, code: str, *, ticket: str | None = None) -> dict[str, Any]:
+        """/passport/totp/bind_verify/ — confirm TOTP enrollment by submitting the 6-digit code.
+        Activates TOTP two-step verification on the account.
+        Verified from TwoStepAuthApi.java."""
+        data: dict[str, Any] = {
+            "aid": self._t.device.aid or "1233",
+            "code": code,
+        }
+        if ticket:
+            data["verify_ticket"] = ticket
+        extra_headers: dict[str, str] = {}
+        if self._t.device.passport_csrf_token:
+            extra_headers["x-tt-passport-csrf-token"] = self._t.device.passport_csrf_token
+        return self._t.post(self._p("/passport/totp/bind_verify/"), data=data, extra_headers=extra_headers, full_sign=True)
+
+    def totp_enable_2sv(self) -> dict[str, Any]:
+        """/passport/safe/two_step_verification/add_verification/v2/ — activate TOTP 2-step verification."""
+        data: dict[str, Any] = {
+            "verify_way": "totp",
+            "is_default": "1",
+        }
+        extra_headers: dict[str, str] = {}
+        if self._t.device.passport_csrf_token:
+            extra_headers["x-tt-passport-csrf-token"] = self._t.device.passport_csrf_token
+        return self._t.post(self._p("/passport/safe/two_step_verification/add_verification/v2/"), data=data, extra_headers=extra_headers, full_sign=True)
+
+    def totp_verify(self, code: str, *, ticket: str | None = None) -> dict[str, Any]:
+        """/passport/totp/verify/ — verify 6-digit TOTP code during two-factor challenge."""
+        data: dict[str, Any] = {
+            "aid": self._t.device.aid or "1233",
+            "code": code,
+        }
+        if ticket:
+            data["ticket"] = ticket
+        extra_headers: dict[str, str] = {}
+        if self._t.device.passport_csrf_token:
+            extra_headers["x-tt-passport-csrf-token"] = self._t.device.passport_csrf_token
+        return self._login_request("/passport/totp/verify/", data)
+
+    def two_step_verification_list(self) -> dict[str, Any]:
+        """/passport/safe/two_step_verification/get_verification_list/ — list active 2SV methods."""
+        extra_headers: dict[str, str] = {}
+        if self._t.device.passport_csrf_token:
+            extra_headers["x-tt-passport-csrf-token"] = self._t.device.passport_csrf_token
+        return self._t.get(self._p("/passport/safe/two_step_verification/get_verification_list/"), extra_headers=extra_headers, full_sign=True)

@@ -35,6 +35,48 @@ from typing import Any
 from ..errors import TikTokError, ServerError
 from .transport import AndroidTransport
 
+
+def _extract_avatar_uri(resp: Any) -> str:
+    """Pull the TOS URI out of /aweme/v1/upload/image/ response.
+
+    Known shapes (across TikTok SDK versions): `data.uri`, top-level `uri`,
+    `image.uri`, or an entry under `url_list`'s parent object. We walk the
+    envelope defensively — the capture only shows the request side, so this
+    is a tolerant extractor rather than a one-liner. A match on the
+    `tos-ali*-avt-` or `tos-maliva-avt-` prefix wins first; otherwise any
+    field named `uri` under a plausible container is accepted."""
+    if not isinstance(resp, dict):
+        return ""
+    # Fast path: known layouts.
+    for key in ("data", "image", "image_info"):
+        node = resp.get(key)
+        if isinstance(node, dict):
+            uri = node.get("uri") or node.get("Uri") or node.get("Vid")
+            if isinstance(uri, str) and uri:
+                return uri
+    uri = resp.get("uri") or resp.get("Uri")
+    if isinstance(uri, str) and uri:
+        return uri
+
+    # Fallback: scan the envelope for a value matching the TOS prefix.
+    def _walk(x: Any) -> str:
+        if isinstance(x, dict):
+            for k, v in x.items():
+                if isinstance(v, str) and ("tos-" in v and "-avt-" in v):
+                    return v
+                found = _walk(v)
+                if found:
+                    return found
+        elif isinstance(x, list):
+            for item in x:
+                found = _walk(item)
+                if found:
+                    return found
+        return ""
+
+    return _walk(resp)
+
+
 class UserAPI:
     def __init__(self, transport: AndroidTransport):
         self._t = transport
@@ -46,6 +88,22 @@ class UserAPI:
     def profile_by_id(self, user_id: str | int) -> dict[str, Any]:
         """/aweme/v1/user/ — lookup by numeric user_id. Works in v46+."""
         return self._t.get("/aweme/v1/user/", params={"user_id": str(user_id)})
+
+    def info(
+        self,
+        *,
+        username: str = "",
+        sec_user_id: str = "",
+        user_id: str = "",
+        web_fallback: bool = True,
+    ) -> dict[str, Any]:
+        """Lookup user profile by username, sec_user_id, or numeric user_id."""
+        return self.profile_other(
+            user_id=user_id,
+            sec_user_id=sec_user_id,
+            username=username,
+            web_fallback=web_fallback,
+        )
 
     def profile_other(
         self,
@@ -255,68 +313,131 @@ class UserAPI:
         changes to roughly once every 30 days."""
         return self._commit_user(unique_id=unique_id)
 
-    def set_avatar_uri(self, avatar_uri: str) -> dict[str, Any]:
-        """/aweme/v1/commit/user/ field=avatar_uri. UNVERIFIED: not
-        live-tested (account was rate-limited by the set_nickname/
-        set_signature probes above before this could be tried); avatar_uri
-        is a TOS object key already returned by a prior ImageX image
-        upload — see upload_avatar()."""
-        return self._commit_user(avatar_uri=avatar_uri)
-
-    def upload_avatar(self, path: str) -> dict[str, Any]:
+    def upload_avatar(self, path_or_bytes: "str | bytes | bytearray") -> dict[str, Any]:
         """Upload a local image and set it as the profile avatar.
 
-        Flow: /aweme/v1/upload/authkey/ -> ImageX ApplyImageUpload -> PUT
-        bytes to TOS -> ImageX CommitImageUpload -> set_avatar_uri(). This
-        reuses UploadAPI's ImageX plumbing (tiktokflow/android/upload.py),
-        which documents that ApplyImageUpload/ApplyUploadInner's SigV4
-        signing is NOT confirmed working yet (every attempt gets a generic
-        "Invalid Authorization header" from the VOD/ImageX control plane —
-        see upload.py's module docstring "REMAINING BLOCKER"). UNVERIFIED /
-        currently blocked: this will raise InvalidRequest at the
-        ApplyImageUpload step until that signing issue is resolved."""
-        from .upload import UploadAPI
+        Real-app flow (confirmed via decrypted capture 20261005_145455 on
+        v46.7.3 Pixel 4 — see docs/EXPERIMENTS/angle1_capture_v2_.../AVATAR_FLOW.md):
+
+        1. POST /aweme/v1/upload/image/ — multipart/form-data with fresh UUID
+           boundary. Every URL query param is also sent as its own form-data
+           text field; the final part is `file` (application/octet-stream)
+           carrying the PNG/JPEG bytes. Response JSON carries the TOS URI.
+        2. POST /aweme/v1/commit/user/ — form body
+           `page_from=7&avatar_source=1&avatar_uri=<URI>` (observed ~92 B),
+           signed with the normal x-argus/x-gorgon/x-ladon/tt-ticket-guard
+           stack like every other /commit/user/ write.
+
+        The ImageX/SigV4 ApplyImageUpload chain previously used here does
+        NOT exist for avatars (returned error 600003); it's a VOD-only path.
+
+        Accepts either a filesystem path or raw image bytes.
+        Returns the fresh profile_self() dict so callers can read the new
+        avatar_larger.uri and verify the change persisted."""
         import os
-        if not os.path.isfile(path):
-            raise FileNotFoundError(path)
-        uploader = UploadAPI(self._t)
-        creds = uploader._authkey()
-        photo_cfg = creds.get("photo_upload_config") or {}
-        auth2 = photo_cfg.get("authorization2") or {}
-        if not auth2:
-            raise TikTokError(f"upload/authkey response missing photo_upload_config.authorization2: {creds}")
-        with open(path, "rb") as f:
-            data = f.read()
-        apply_result = uploader._vod_call(
-            "ApplyImageUpload",
-            {
-                "SpaceName": auth2.get("space_name", ""),
-                "ServiceId": auth2.get("space_name", ""),
-                "FileSize": str(len(data)),
-            },
-            auth2,
+        import uuid as _uuid
+        from urllib.parse import urlencode
+
+        if isinstance(path_or_bytes, (bytes, bytearray)):
+            data = bytes(path_or_bytes)
+        else:
+            if not os.path.isfile(path_or_bytes):
+                raise FileNotFoundError(path_or_bytes)
+            with open(path_or_bytes, "rb") as _f:
+                data = _f.read()
+        if not data:
+            raise TikTokError("upload_avatar: empty image data")
+
+        # Resolve uid / sec_uid for the query — the real app includes both.
+        me = self.profile_self().get("user") or {}
+        uid = str(me.get("uid") or getattr(self._t.device, "user_id", "") or "")
+        sec_uid = me.get("sec_uid", "") or ""
+
+        # Build the exact query dict the real app sends. We mirror the
+        # transport's common_params and add the avatar-specific knobs.
+        # The multipart body echoes every one of these as a text field.
+        qp = dict(self._t.device.common_params())
+        qp["source"] = "0"
+        qp["retry_type"] = "no_retry"
+        if uid:
+            qp["uid"] = uid
+        if sec_uid:
+            qp["sec_uid"] = sec_uid
+
+        # Build multipart body in the exact shape of the capture:
+        #   --<boundary>\r\n
+        #   Content-Disposition: form-data; name="<name>"\r\n
+        #   Content-Type: text/plain; charset=UTF-8\r\n
+        #   Content-Length: <N>\r\n
+        #   Content-Transfer-Encoding: binary\r\n\r\n
+        #   <value>\r\n
+        # ... and the final `file` part uses application/octet-stream.
+        boundary = str(_uuid.uuid4())
+        buf: list[bytes] = []
+        for k, v in qp.items():
+            val = str(v).encode("utf-8")
+            buf.append(
+                f"--{boundary}\r\n"
+                f"Content-Disposition: form-data; name=\"{k}\"\r\n"
+                f"Content-Type: text/plain; charset=UTF-8\r\n"
+                f"Content-Length: {len(val)}\r\n"
+                f"Content-Transfer-Encoding: binary\r\n\r\n".encode("utf-8")
+            )
+            buf.append(val)
+            buf.append(b"\r\n")
+        buf.append(
+            f"--{boundary}\r\n"
+            f"Content-Disposition: form-data; name=\"file\"; filename=\"image\"\r\n"
+            f"Content-Type: application/octet-stream\r\n"
+            f"Content-Length: {len(data)}\r\n"
+            f"Content-Transfer-Encoding: binary\r\n\r\n".encode("utf-8")
         )
-        upload_addr = (apply_result.get("Result") or apply_result).get("UploadAddress") or {}
-        session_key = upload_addr.get("SessionKey", "")
-        store_infos = upload_addr.get("StoreInfos") or []
-        upload_hosts = upload_addr.get("UploadHosts") or [photo_cfg.get("fileHostName", "")]
-        if not store_infos:
-            raise TikTokError(f"ApplyImageUpload did not return StoreInfos: {apply_result}")
-        uploader._put_object(data, store_infos, upload_hosts, mime="image/jpeg")
-        import json as _json
-        commit_result = uploader._vod_call(
-            "CommitImageUpload",
-            {"SpaceName": auth2.get("space_name", "")},
-            auth2,
-            method="POST",
-            body=_json.dumps({"SessionKey": session_key}).encode(),
+        buf.append(data)
+        buf.append(b"\r\n")
+        buf.append(f"--{boundary}--\r\n".encode("utf-8"))
+        body = b"".join(buf)
+
+        # The transport's write path merges fresh common_params in and then
+        # overlays our params. By passing the full qp dict as params we
+        # guarantee the query is a byte-for-byte superset of what the
+        # multipart body contains (fresh common_params only supply defaults).
+        resp = self._t.post(
+            "/aweme/v1/upload/image/",
+            params=qp,
+            content=body,
+            headers={"content-type": f"multipart/form-data; boundary={boundary}"},
+            write=True,
+            full_sign=True,
         )
-        from .upload import _extract_vod_ref
-        vid, uri = _extract_vod_ref(commit_result)
-        avatar_uri = vid or uri
+
+        # Response shape: standard aweme envelope with the TOS URI nested
+        # under one of a few candidate keys. We check all we have seen in
+        # the SDK (data.uri / image.uri / top-level uri / url_list parent).
+        avatar_uri = _extract_avatar_uri(resp)
         if not avatar_uri:
-            raise TikTokError(f"CommitImageUpload did not return a Vid/Uri: {commit_result}")
-        return self.set_avatar_uri(avatar_uri)
+            raise TikTokError(
+                f"upload/image/ did not return a usable URI; response={resp!r}"
+            )
+
+        # Step 2: commit the new avatar on the user. This rides the normal
+        # /commit/user/ write stack (x-argus/x-gorgon/x-ladon/tt-ticket-guard).
+        # Observed body shape (~92 B): page_from=7&avatar_source=1&avatar_uri=<uri>.
+        commit = self._t.post(
+            "/aweme/v1/commit/user/",
+            data={
+                "page_from": "7",
+                "avatar_source": "1",
+                "avatar_uri": avatar_uri,
+            },
+            write=True,
+            full_sign=True,
+        )
+        # Fetch fresh profile so the caller can read the new URI.
+        fresh = self.profile_self()
+        fresh.setdefault("_upload_image_response", resp)
+        fresh.setdefault("_commit_user_response", commit)
+        fresh["_avatar_uri"] = avatar_uri
+        return fresh
 
     # ------------------------------------------------------------------
     # Privacy settings — named helpers over /aweme/v1/user/set/settings/

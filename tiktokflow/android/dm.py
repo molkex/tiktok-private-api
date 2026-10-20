@@ -173,6 +173,53 @@ class DMAPI:
             "user_id": to_user_id,
         }, full_sign=True, proto_mode="generic")
 
+    def create_group_conversation(self, to_user_ids: list[str], *, name: str = "") -> dict[str, Any]:
+        """/v2/conversation/create — create a group conversation with
+        multiple participants. Same endpoint as create_conversation() (the
+        decompiled proto type backing it is literally named
+        CreateConversationV2RequestBody, singular for both 1:1 and group),
+        switched to plural/group fields.
+
+        Field names are UNCONFIRMED against a live response (this account's
+        IM subsystem is blocked account-wide -- see send()'s docstring --
+        so no group-create response has ever been observed), but are not
+        guesses either: "to_user_ids" and "conversation_name" (technically
+        "inviter_uid" not used here) are literal string-table constants
+        pulled from work/all_strings.txt (grep hits at the raw APK string
+        pool, not from any decompiled Java source), strongly suggesting
+        these are the real form field names for CreateConversationV2RequestBody
+        -- the plural "to_user_ids" doesn't exist anywhere else in the
+        codebase besides this feature's data-class fields.
+
+        conversation_type is passed as 2 (group), by analogy with the
+        1 (=1:1) / 2 (=group) guess documented on send()'s
+        conversation_type parameter -- also unconfirmed.
+
+        LIVE FINDING (@1232140499y, v46): posting this as plain
+        form-urlencoded data -- the same way create_conversation() posts to
+        this identical path -- gets rejected with status_code=500,
+        error_desc="failed to decode Protobuf message: Request.version_code:
+        invalid wire type: EndGroup (expected LengthDelimited)". That error
+        text is the server's protobuf parser choking on our form-encoded
+        ASCII body, which means /v2/conversation/create/ actually wants the
+        same binary Request/RequestBody protobuf envelope send() builds
+        (see send()'s docstring), not bare form data -- create_conversation()
+        (the pre-existing 1:1 variant, unmodified here) is almost certainly
+        equally broken for the same reason, it just was never live-tested
+        against this account's IM stack before now. Building the correct
+        envelope needs the RPC's ``cmd`` id and the RequestBody oneof field
+        number for conversation-create, neither of which turned up in the
+        decompiled proto *class list* (field numbers require decompiling
+        CreateConversationV2RequestBody's ADAPTER methods specifically,
+        which wasn't done here). Left as form-encoded pending that -- mark
+        this UNVERIFIED / confirmed-wrong-wire-format rather than untested."""
+        import json as _json
+        return self._t.post("/v2/conversation/create/", data={
+            "to_user_ids": _json.dumps(list(to_user_ids)),
+            "conversation_type": 2,
+            "conversation_name": name,
+        }, full_sign=True, proto_mode="generic")
+
     def delete_conversation(self, conversation_id: str) -> dict[str, Any]:
         """/v1/conversation/delete"""
         return self._t.post("/v1/conversation/delete/", data={
@@ -361,6 +408,61 @@ class DMAPI:
         decoded = _decode_send_response(result if isinstance(result, dict) else {})
         decoded["ok"] = decoded.get("status_code") == 0
         return decoded
+
+    def send_media(
+        self,
+        conversation_id: str,
+        media_url: str,
+        *,
+        message_type: int,
+        width: int = 0,
+        height: int = 0,
+        **send_kwargs: Any,
+    ) -> dict[str, Any]:
+        """Send an image (message_type=2) or video (message_type=3) DM
+        attachment, reusing send()'s CONFIRMED Request/RequestBody/
+        SendMessageRequestBody envelope (see send()'s docstring for the
+        wire-format trace) with content=field 4 set to a JSON blob
+        describing the media instead of plain text.
+
+        UNCONFIRMED beyond the envelope itself: no ImageContent/VideoContent
+        proto message was found in the decompiled proto package list (only
+        MediaInfo/MediaMeta/MediaURLStruct/MediaUploadConfig/SendMediaRequest
+        class *names* turned up in the string table -- see
+        GetMediaUploadConfigResponseBody etc. in work/all_strings.txt --
+        their field layouts were not decompiled). The JSON-in-content
+        shape used here ({"image_url"/"video_url", "width", "height"}) is
+        this codebase's best-effort guess, not a confirmed schema, and
+        ``media_url`` must already be a hosted/uploaded URL (e.g. from
+        cloud_token() + a TOS/imagex upload this method does NOT perform --
+        no confirmed upload-completion endpoint was found to turn raw
+        bytes into that URL).
+
+        message_type values themselves also aren't independently confirmed
+        (only message_type=1/text is proven by send()'s live testing);
+        2=image/3=video follow the obvious ordinal convention seen in most
+        chat SDKs but were not observed on the wire.
+
+        This account's IM subsystem is blocked entirely (status_code=200001
+        on every DM endpoint, per send()'s docstring), so this method could
+        not be exercised end-to-end against a real conversation."""
+        import json as _json
+        content = _json.dumps({
+            ("image_url" if message_type == 2 else "video_url"): media_url,
+            "width": width,
+            "height": height,
+        })
+        return self.send(conversation_id, content, message_type=message_type, **send_kwargs)
+
+    def send_image(self, conversation_id: str, image_url: str, *, width: int = 0, height: int = 0, **kw: Any) -> dict[str, Any]:
+        """Send an image attachment. See send_media()'s docstring for the
+        (unconfirmed) content schema and the account-level IM blocker."""
+        return self.send_media(conversation_id, image_url, message_type=2, width=width, height=height, **kw)
+
+    def send_video(self, conversation_id: str, video_url: str, *, width: int = 0, height: int = 0, **kw: Any) -> dict[str, Any]:
+        """Send a video attachment. See send_media()'s docstring for the
+        (unconfirmed) content schema and the account-level IM blocker."""
+        return self.send_media(conversation_id, video_url, message_type=3, width=width, height=height, **kw)
 
     def delete_message(self, conversation_id: str, message_id: str) -> dict[str, Any]:
         """/v1/message/delete — delete a message for yourself."""

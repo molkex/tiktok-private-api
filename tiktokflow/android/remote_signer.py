@@ -11,21 +11,34 @@ import base64
 
 import httpx
 
+from ..errors import AuthError, RateLimitError, ServerError
+
+
+def _handle_error(resp: httpx.Response) -> None:
+    if resp.status_code == 429:
+        detail = resp.json().get("detail", "rate limit exceeded") if resp.headers.get("content-type", "").startswith("application/json") else resp.text
+        raise RateLimitError(f"signing server: {detail}", http_status=429)
+    if resp.status_code == 403:
+        raise AuthError("signing server: invalid or revoked API key", http_status=403)
+    if resp.status_code >= 500:
+        raise ServerError(f"signing server error: {resp.status_code}", http_status=resp.status_code)
+    resp.raise_for_status()
+
 
 class RemoteSigner:
     def __init__(
         self,
         server_url: str,
-        api_key: str,
+        api_key: str | None = None,
         *,
         timeout: float = 5.0,
     ):
         self._url = server_url.rstrip("/")
         self._api_key = api_key
-        self._client = httpx.Client(
-            timeout=timeout,
-            headers={"X-API-Key": api_key, "Content-Type": "application/json"},
-        )
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["X-API-Key"] = api_key
+        self._client = httpx.Client(timeout=timeout, headers=headers)
 
     def sign(
         self,
@@ -76,13 +89,33 @@ class RemoteSigner:
             "ts_sign": ts_sign,
         }
         resp = self._client.post(f"{self._url}/v1/sign", json=payload)
-        if resp.status_code == 429:
-            raise RuntimeError("signing server rate limit exceeded")
-        if resp.status_code == 403:
-            raise RuntimeError("signing server: invalid API key")
-        resp.raise_for_status()
+        _handle_error(resp)
         data = resp.json()
         return data["headers"], data["ts"]
+
+    def register(
+        self,
+        *,
+        payload_json: str,
+        query_string: str,
+        cookie_string: str = "",
+    ) -> tuple[bytes, dict[str, str], int]:
+        """TTEncrypt + sign for device_register in one call.
+
+        Returns (encrypted_body, sign_headers, timestamp).
+        """
+        resp = self._client.post(f"{self._url}/v1/register", json={
+            "payload_json": payload_json,
+            "query_string": query_string,
+            "cookie_string": cookie_string,
+        })
+        _handle_error(resp)
+        data = resp.json()
+        return (
+            base64.b64decode(data["encrypted_body_b64"]),
+            data["sign_headers"],
+            data["ts"],
+        )
 
     def close(self) -> None:
         self._client.close()

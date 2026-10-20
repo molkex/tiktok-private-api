@@ -16,7 +16,6 @@ from typing import Any
 from .async_endpoints import (
     AsyncCommentAPI,
     AsyncDMAPI,
-    AsyncEffectAPI,
     AsyncFeedAPI,
     AsyncLiveAPI,
     AsyncMusicAPI,
@@ -90,7 +89,6 @@ class AsyncAndroidClient:
         self.passport = AsyncPassportAPI(self.transport)
         self.live = AsyncLiveAPI(self.transport)
         self.dm = AsyncDMAPI(self.transport)
-        self.effect = AsyncEffectAPI(self.transport)
 
     @property
     def is_authenticated(self) -> bool:

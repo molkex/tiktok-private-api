@@ -62,6 +62,7 @@ class IOSDevice:
     clientudid: str = ""
     device_type: str = ""
     device_brand: str = "Apple"
+    device_platform: str = "iphone"
     os_version: str = ""
     os_api: str = ""  # unused on iOS, kept for field parity with Device
     app_version: str = TIKTOK_APP_VERSION
@@ -361,10 +362,13 @@ class IOSDevice:
                 return secrets.get(ios_key) or ""
             return secrets.get(ios_key) or secrets.get(android_key) or ""
 
-        token = pick_tok("TIKTOK_IOS_X_TT_TOKEN", "TIKTOK_X_TT_TOKEN")
+        # TIKTOK_IOS_GUARD_TICKET / _TS_SIGN = ticket-guard credentials extracted
+        # from the iPhone (NSUserDefaults kTTAccountTokenGuard*). Signed with the
+        # attested key (TIKTOK_IOS_GUARD_PRIV_D) they make writes get result:0.
+        token = secrets.get("TIKTOK_IOS_GUARD_TICKET") or pick_tok("TIKTOK_IOS_X_TT_TOKEN", "TIKTOK_X_TT_TOKEN")
         if token:
             self.token = token
-        ts_sign = pick_tok("TIKTOK_IOS_TS_SIGN", "TIKTOK_TS_SIGN")
+        ts_sign = secrets.get("TIKTOK_IOS_GUARD_TS_SIGN") or pick_tok("TIKTOK_IOS_TS_SIGN", "TIKTOK_TS_SIGN")
         if ts_sign:
             self.ts_sign = ts_sign
         device_token = pick_tok("TIKTOK_IOS_DEVICE_TOKEN", "TIKTOK_DEVICE_TOKEN")
@@ -417,7 +421,8 @@ class IOSDevice:
     def save_session_env(self, path: str = "~/.secrets.env") -> None:
         """Persist current session credentials to env file under TIKTOK_IOS_*
         keys (update in-place) so it doesn't clobber an Android session."""
-        import os, re
+        import os
+        import re
         path = os.path.expanduser(path)
         try:
             with open(path) as f:

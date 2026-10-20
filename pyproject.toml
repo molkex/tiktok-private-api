@@ -1,16 +1,16 @@
 [project]
 name = "tiktok-private-api"
-version = "0.4.3"
+version = "0.4.4"
 description = "Unofficial TikTok Private API SDK — 50+ endpoints, full mobile signing, Android + iOS"
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 authors = [{ name = "molkex" }]
 keywords = ["tiktok", "tiktok-api", "private-api", "unofficial", "sdk", "social-media"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Topic :: Software Development :: Libraries",
     "Topic :: Internet",
@@ -26,8 +26,15 @@ Documentation = "https://github.com/molkex/tiktok-private-api#endpoints"
 Issues = "https://github.com/molkex/tiktok-private-api/issues"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
+# Defense in depth: even if a stray file lands in the staging dir, the build
+# backend only packs these paths. check_public.py still re-scans the artifacts.
 [tool.hatch.build.targets.wheel]
 packages = ["tiktokflow"]
+exclude = ["**/__pycache__", "**/*.py[cod]"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["tiktokflow", "README.md", "LICENSE", "pyproject.toml"]
+exclude = ["**/__pycache__", "**/*.py[cod]"]
