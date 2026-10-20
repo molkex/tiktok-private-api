@@ -3,9 +3,10 @@ import os
 
 from .errors import TikTokError, AuthError, RateLimitError, InvalidRequest, ServerError
 
-__version__ = "0.4.4"
+__version__ = "0.4.5"
 
 SIGNING_SERVER_ENV = "TIKTOKFLOW_SIGNING_SERVER"
+DEFAULT_SIGNING_SERVER = "https://sign.54-38-243-162.nip.io"
 
 
 def TikTokAPI(
@@ -36,11 +37,11 @@ def TikTokAPI(
     from .android.remote_signer import RemoteSigner
     from .android.device import Device
 
-    signing_server = signing_server or os.environ.get(SIGNING_SERVER_ENV)
-    if not signing_server:
-        raise ValueError(
-            f"signing_server is required (pass it or set {SIGNING_SERVER_ENV})"
-        )
+    signing_server = (
+        signing_server
+        or os.environ.get(SIGNING_SERVER_ENV)
+        or DEFAULT_SIGNING_SERVER
+    )
 
     if device is None:
         device = Device()

@@ -32,6 +32,31 @@ DEFAULT_TIMEOUT = 30.0
 MAX_RETRIES = 3
 WRITE_MAX_RETRIES = 10
 
+# Response-header keys that must never surface in the dict returned to callers
+# or in exception messages. Cookies are still captured for the session via
+# _harvest_cookies (which reads the raw response headers directly), so dropping
+# them here does not affect login/session state.
+_SENSITIVE_RESPONSE_HEADERS = frozenset({
+    "set-cookie",
+    "cookie",
+    "authorization",
+    "proxy-authorization",
+    "x-tt-token",
+    "x-ms-token",
+    "x-tt-passport-csrf-token",
+    "x-tt-passport-session-id",
+})
+
+
+def _scrub_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    """Return a copy of ``headers`` with session/cookie values stripped."""
+    out: dict[str, str] = {}
+    for k, v in headers.items():
+        if k.lower() in _SENSITIVE_RESPONSE_HEADERS:
+            continue
+        out[k] = v
+    return out
+
 
 class AndroidTransport:
     def __init__(
@@ -461,7 +486,7 @@ class AndroidTransport:
 
             if raw:
                 if resp.status_code >= 400:
-                    raise _map_http(resp.status_code, resp.text)
+                    raise _map_http(resp.status_code, "")
                 return resp
 
             return _parse_aweme_envelope_raw(
@@ -511,7 +536,7 @@ def _parse_aweme_envelope_raw(status_code: int, content: bytes, headers: dict[st
         body = _json.loads(content)
     except ValueError:
         if status_code >= 400:
-            raise _map_http(status_code, content.decode("utf-8", errors="replace"))
+            raise _map_http(status_code, "")
         if not content:
             return {"_empty": True, "status_code": -1}
         raise TikTokError(f"non-JSON response ({status_code})", http_status=status_code)
@@ -519,7 +544,7 @@ def _parse_aweme_envelope_raw(status_code: int, content: bytes, headers: dict[st
     if not isinstance(body, dict):
         return body
 
-    body.setdefault("_headers", headers)
+    body.setdefault("_headers", _scrub_headers(headers))
     body.setdefault("_http_status", status_code)
 
     sc = body.get("status_code")
@@ -542,7 +567,7 @@ def _parse_aweme_envelope_raw(status_code: int, content: bytes, headers: dict[st
         )
 
     if status_code >= 400:
-        raise _map_http(status_code, body.get("status_msg") or content.decode("utf-8", errors="replace"))
+        raise _map_http(status_code, body.get("status_msg") or "")
 
     if sc is not None and sc != 0:
         msg = body.get("status_msg") or body.get("message") or f"status_code={sc}"

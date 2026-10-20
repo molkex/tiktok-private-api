@@ -18,12 +18,11 @@ not ours.** We never see request bodies or responses.
 pip install tiktok-private-api
 ```
 
-> **Known issue:** version `0.4.3` currently on PyPI has an import bug and
-> fails to load (`ModuleNotFoundError` on first `import tiktokflow`). A fixed
-> `0.4.4` is being prepared — pin to it once released. In the meantime, use
-> `0.3.0` (`pip install tiktok-private-api==0.3.0`).
-
 ## Quickstart
+
+The default signing server is `https://sign.54-38-243-162.nip.io`. Override
+it with the environment variable `TIKTOKFLOW_SIGNING_SERVER` or by passing
+`signing_server=` to the client.
 
 Sync:
 
@@ -48,7 +47,10 @@ from tiktokflow.android.remote_signer import RemoteSigner
 from tiktokflow.android.device import Device
 
 async def main():
-    signer = RemoteSigner("https://sign.example", api_key="sk_live_...")
+    signer = RemoteSigner(
+        "https://sign.54-38-243-162.nip.io",
+        api_key="sk_live_...",
+    )
     async with AsyncAndroidClient(Device(), signer=signer) as tt:
         feed = await tt.feed.for_you(count=10)
         print(len(feed["aweme_list"]))
@@ -58,13 +60,12 @@ asyncio.run(main())
 
 ## How to get a key
 
-1. Open [`@lazymanagerrobot`](https://t.me/lazymanagerrobot) on Telegram.
+1. Open [`@tiktok_private_api_bot`](https://t.me/tiktok_private_api_bot) on Telegram.
 2. Send `/key`.
 3. The bot replies with your personal API key (shown once — save it).
 
-Keys are **free** right now. A paid tier is planned later; it will be a
-single flag flip on the server, so your code will not change — only the
-rate-limit numbers.
+Keys are **free**. Any question that is not "/key /rotate /revoke /stats" —
+ping [`@mxmtkchk`](https://t.me/mxmtkchk) directly.
 
 ## What we see on our side
 
@@ -89,14 +90,22 @@ above, and request/response bodies never reach them. If you want to audit it,
 ping the maintainer on Telegram — the relevant file in the private repo can
 be shared.
 
-## Rate limits and tiers
+## Rate limits
 
-- **No monthly or daily quotas.** You pay nothing while the service is free; usage is not capped by volume.
-- **Per-key safety ceiling: 100 req/s, burst 500.** This is a crash-loop guard for the signing service itself, not a product limit — a thousand client accounts at normal activity stay well under it. If a runaway script spikes above the burst, the service answers `429` on the excess; backing off a second clears it.
-- **Paid tier (later):** no rate changes planned; the paid flag unlocks support, SLAs, and extended endpoints when they land. Same API, same key format.
+Default **1000 req/s with burst 5000 per key** — this is a service safety
+ceiling, not a product cap. A thousand client accounts at normal activity
+stay well under it. If a runaway script spikes above the burst, the service
+answers `429` on the excess; backing off a second clears it.
 
 The limit is global per key, not per process, so running two workers does
 not double it.
+
+**No monthly or daily quotas.** You pay nothing; usage is not capped by
+volume.
+
+Need more for a big farm (tens of thousands of accounts)? Ping
+[`@mxmtkchk`](https://t.me/mxmtkchk) — individual per-key limits can be
+raised on request.
 
 ## Supported endpoints
 
@@ -145,4 +154,5 @@ Licensed under the MIT License — see [`LICENSE`](LICENSE).
 
 - Issues: <https://github.com/molkex/tiktok-private-api/issues>
 - Security policy: [`SECURITY.md`](SECURITY.md)
-- Key dispatcher bot: [`@lazymanagerrobot`](https://t.me/lazymanagerrobot)
+- Key dispatcher bot: [`@tiktok_private_api_bot`](https://t.me/tiktok_private_api_bot)
+- Maintainer: [`@mxmtkchk`](https://t.me/mxmtkchk)

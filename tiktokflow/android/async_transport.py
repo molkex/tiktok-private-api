@@ -277,7 +277,7 @@ class AsyncAndroidTransport:
 
             if raw:
                 if resp.status_code >= 400:
-                    raise _map_http(resp.status_code, resp.text)
+                    raise _map_http(resp.status_code, "")
                 return resp
 
             return _parse_aweme_envelope(resp, proto_mode=proto_mode)

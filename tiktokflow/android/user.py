@@ -415,8 +415,12 @@ class UserAPI:
         # the SDK (data.uri / image.uri / top-level uri / url_list parent).
         avatar_uri = _extract_avatar_uri(resp)
         if not avatar_uri:
+            status = resp.get("_http_status") if isinstance(resp, dict) else None
+            sc = resp.get("status_code") if isinstance(resp, dict) else None
             raise TikTokError(
-                f"upload/image/ did not return a usable URI; response={resp!r}"
+                "upload/image/ did not return a usable URI",
+                http_status=status,
+                code=str(sc) if sc is not None else None,
             )
 
         # Step 2: commit the new avatar on the user. This rides the normal

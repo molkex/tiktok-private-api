@@ -1,6 +1,6 @@
 [project]
 name = "tiktok-private-api"
-version = "0.4.4"
+version = "0.4.5"
 description = "Unofficial TikTok Private API SDK — 50+ endpoints, full mobile signing, Android + iOS"
 readme = "README.md"
 license = "MIT"
