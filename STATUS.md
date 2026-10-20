@@ -35,7 +35,7 @@ Access levels:
 | **dm** | — | ✅ `send` · 🟡 `send_media`, `mute`, `delete_*`, `recall`, `stranger_*` (not re-verified) | ✅ `conversations`, `messages`, `unread_count`, `mark_read` |
 | **upload** | — | — | ✅ `creator_info`, `upload_video`, `upload_photo` (creator account required) |
 | **notice** | — | — | ✅ `multi`, `count`, `inbox`, `delete`, `shield` |
-| **passport** | — | ✅ `email_login`, `sms_login`, `user_login`, `mobile_login`, `oauth_login`, `qr_*` (sessions)<br>🔴 `register_email`, `register_mobile`, `register_username`, `send_email_code(scene="register")` (captcha + device-trust wall, pure HTTP success rate is very low) | ✅ `change_password`, `TOTP`, `logout`, `refresh_session`, `switch_account` |
+| **passport** | — | ✅ `email_login`, `sms_login`, `user_login`, `mobile_login`, `oauth_login`, `qr_*` (sessions)<br>🟡 `email_register`, `send_email_code(scene="register")` (experimental auto-captcha, requires `TIKTOKFLOW_RUCAPTCHA_KEY`; still blocked by device-trust wall on many fresh IPs)<br>🔴 `register_mobile`, `register_username` (captcha + device-trust wall, pure HTTP success rate is very low) | ✅ `change_password`, `TOTP`, `logout`, `refresh_session`, `switch_account` |
 
 ## Known dead ends on pure HTTP
 
@@ -52,7 +52,9 @@ If you need writes to stick today, you have two options:
 
 ### Registration
 
-`passport.register_*` and `passport.send_email_code(scene="register")` almost always hit TikTok's captcha + device-trust wall. Even with a 2captcha solver and residential IP success rate is low. If you need accounts, prefer logging into existing ones or running registration on a real device.
+`passport.email_register` and `passport.send_email_code(scene="register")` now auto-handle the slide-captcha when `TIKTOKFLOW_RUCAPTCHA_KEY` is set (bdturing fetch → 2captcha solve → verify → retry with ticket, up to 2 attempts, exponential backoff). This moves them from 🔴 to 🟡 experimental: the captcha step succeeds routinely, but TikTok's second-level `decision_conf` / `twice_verify` and device-trust wall still reject a significant share of fresh-IP attempts. See the SDK README section "Account generation flow" for the honest end-to-end example and limitations.
+
+`passport.register_mobile` and `passport.register_username` are still 🔴 — their captcha path is wired but device-trust rejections dominate. If you need accounts reliably, prefer logging into existing ones or running registration on a real device.
 
 ### Captcha on login
 
