@@ -1,10 +1,21 @@
 # tiktok-private-api
 
+[![status](https://img.shields.io/badge/status-early--but--usable-orange)](STATUS.md)
+[![python](https://img.shields.io/badge/python-%E2%89%A53.11-blue)](https://pypi.org/project/tiktok-private-api/)
+[![pypi](https://img.shields.io/pypi/v/tiktok-private-api)](https://pypi.org/project/tiktok-private-api/)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![telegram](https://img.shields.io/badge/key%20bot-%40tiktok__private__api__bot-26A5E4?logo=telegram)](https://t.me/tiktok_private_api_bot)
+
 A Python SDK for the private TikTok mobile API — the same endpoints the
 Android and iOS apps use. Pure HTTP from your machine; request signing
 (X-Argus / X-Ladon / X-Gorgon / X-Khronos / device fingerprint) runs on a
 hosted service you call with an API key. Requests to TikTok leave your IP,
 not ours.
+
+> **Where the project is right now:** reads work well, logins work, writes
+> like follow/like/comment are a known dead end on pure HTTP. See
+> [**STATUS.md**](STATUS.md) for the honest capability matrix, dead ends,
+> roadmap, and how to help.
 
 ```bash
 pip install tiktok-private-api
