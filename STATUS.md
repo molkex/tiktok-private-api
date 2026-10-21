@@ -3,7 +3,9 @@
 This SDK is early. Reads work well, logins work, writes are a problem.
 This page is the honest truth about every endpoint and about what we need help with.
 
-Last updated: 2026-10-20.
+**Access:** a free API key, no payment — message [@tiktok_private_api_bot](https://t.me/tiktok_private_api_bot) and send `/key` (one active key per user). Reads work with the trial key on first run; a key lifts the limits.
+
+Last updated: 2026-10-21.
 
 ## Legend
 
