@@ -7,6 +7,27 @@ This page is the honest truth about every endpoint and about what we need help w
 
 Last updated: 2026-10-21.
 
+## Pure-HTTP zero-device — where it stops
+
+With just an API key — no phone, no emulator, no login — these work: all public
+**reads**, **search**, and the **remove / neutral** writes
+(`unfollow`, `unlike`, `unrepost`, `block`, `remove_follower`), plus uploading
+media to storage.
+
+These do **not** work zero-device, no matter how the request is shaped — they
+need a real logged-in device running the app:
+
+- add-engagement: `follow`, `like`, `repost`, `comment.publish`, `comment.digg`, `video.collect`
+- publishing a post (`create`) and editing your own profile fields
+- fresh account registration (device-trust wall)
+
+The call returns `status_code: 0` and looks successful, but TikTok silently
+drops it unless it came from an on-device execution context. That is the wall.
+Everything request-side — signing, headers, attestation, device fingerprint,
+proxy/IP, transport fingerprint — has been tried and does **not** move it, so
+there is no point grinding on those. If you have found a way through from pure
+HTTP, open an issue — that is exactly the help we want.
+
 ## Legend
 
 | | |
@@ -120,4 +141,4 @@ Pull requests welcome. Issues even more so.
 - bot (keys, support): [@tiktok_private_api_bot](https://t.me/tiktok_private_api_bot)
 - maintainer: [@mxmtkchk](https://t.me/mxmtkchk)
 - issues: https://github.com/molkex/tiktok-private-api/issues
-- security: see [`SECURITY.md`](SECURITY.md)
+- security: see [`SECURITY.md`](https://github.com/molkex/tiktok-private-api/blob/main/SECURITY.md)
