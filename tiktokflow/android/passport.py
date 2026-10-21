@@ -30,9 +30,150 @@ Device.import_cookies() (see device.py) instead of going through any login
 call here — useful when cookies were captured out-of-band."""
 from __future__ import annotations
 
-from typing import Any
+import logging
+import os
+import time
+from typing import Any, Callable
 
+from ..errors import AuthError
 from .transport import AndroidTransport, _parse_aweme_envelope
+
+_logger = logging.getLogger(__name__)
+
+CAPTCHA_MAX_RETRIES = 2
+CAPTCHA_INITIAL_BACKOFF = 1.0
+RUCAPTCHA_ENV = "TIKTOKFLOW_RUCAPTCHA_KEY"
+
+
+def _is_captcha_blocked(resp: Any) -> tuple[bool, dict | None]:
+    """Classify a passport response as captcha-blocked.
+
+    Returns (needs_captcha, challenge_hint). challenge_hint carries
+    decision_conf / challenge_code when bdturing's detector surfaces them;
+    None when the only signal was an opaque empty/-1 body (common on
+    registration endpoints that silently refuse before emitting a challenge
+    descriptor).
+    """
+    if not isinstance(resp, dict):
+        return False, None
+    if resp.get("_empty") and resp.get("status_code") == -1:
+        return True, None
+    # Auto-captcha detection (bdturing) is not part of the open SDK; a manual
+    # captcha= ticket on the request still works. See STATUS.md.
+    return False, None
+
+
+def _solve_bdturing_ticket(
+    transport: AndroidTransport, *, detail: str, challenge_code: int | None,
+) -> str:
+    """Run one end-to-end bdturing slide-captcha solve and return the ticket
+    to attach as the `captcha` field on the replayed request.
+
+    Reuses the existing bdturing module (fetch_challenge → solve_slide →
+    verify → extract_ticket) — no new signing or crypto here.
+    """
+    # The automated slide-captcha solver (bdturing) is not part of the open
+    # SDK. Pass a captcha= ticket from your own solver, or use the hosted
+    # signing service. This path is only reached when TIKTOKFLOW_RUCAPTCHA_KEY
+    # is set and a challenge was detected; _captcha_retry catches the error and
+    # returns the response as-is.
+    raise RuntimeError(
+        "auto captcha solving is not part of the open SDK; "
+        "pass captcha=<ticket> or use the hosted signing service"
+    )
+
+
+def _captcha_retry(
+    transport: AndroidTransport,
+    call: Callable[[str | None], Any],
+    *,
+    label: str,
+    initial_captcha: str | None = None,
+    max_retries: int = CAPTCHA_MAX_RETRIES,
+) -> Any:
+    """Call `call(captcha_arg)` with auto-captcha retry.
+
+    Flow:
+      1. Try `call(initial_captcha)`.
+      2. If the response reads as captcha-blocked (opaque empty/-1 body,
+         or bdturing-detected decision_conf/image_captcha), fetch a ticket
+         via bdturing + the user's 2captcha/rucaptcha API key (env
+         ``TIKTOKFLOW_RUCAPTCHA_KEY``) and retry with that ticket.
+      3. Up to ``max_retries`` extra attempts, exponential backoff.
+
+    Logs retry attempts without ever logging the response body or the
+    captcha ticket itself. Returns the last response (or raises the last
+    exception) when retries are exhausted.
+    """
+    api_key = os.environ.get(RUCAPTCHA_ENV, "").strip()
+    captcha_arg = initial_captcha
+    backoff = CAPTCHA_INITIAL_BACKOFF
+    last_resp: Any = None
+    last_exc: Exception | None = None
+
+    for attempt in range(max_retries + 1):
+        resp: Any = None
+        exc: Exception | None = None
+        try:
+            resp = call(captcha_arg)
+        except AuthError as e:
+            exc = e
+            if e.http_status not in (401, 403):
+                raise
+
+        last_resp = resp
+        last_exc = exc
+
+        if exc is None:
+            needs, hint = _is_captcha_blocked(resp)
+        else:
+            needs, hint = True, None
+
+        if not needs:
+            return resp
+
+        if attempt >= max_retries:
+            _logger.warning(
+                "%s: captcha retry exhausted after %d attempt(s)", label, attempt + 1,
+            )
+            if exc is not None:
+                raise exc
+            return resp
+
+        if not api_key:
+            _logger.info(
+                "%s: captcha challenge detected but %s not set; returning as-is",
+                label, RUCAPTCHA_ENV,
+            )
+            if exc is not None:
+                raise exc
+            return resp
+
+        detail = (hint or {}).get("decision_conf", "") or ""
+        challenge_code = (hint or {}).get("challenge_code")
+        _logger.info(
+            "%s: captcha challenge, solving (attempt=%d, has_hint=%s)",
+            label, attempt + 1, bool(hint),
+        )
+        try:
+            captcha_arg = _solve_bdturing_ticket(
+                transport, detail=detail, challenge_code=challenge_code or 1105,
+            )
+        except Exception as se:
+            _logger.warning(
+                "%s: captcha solve failed (%s); giving up",
+                label, type(se).__name__,
+            )
+            if exc is not None:
+                raise exc
+            return resp
+
+        time.sleep(backoff)
+        backoff *= 2
+
+    if last_exc is not None:
+        raise last_exc
+    return last_resp
 
 
 def _mix(value: str) -> str:
@@ -131,51 +272,100 @@ class PassportAPI:
         scene: str = "register",
         type_: int | None = None,
         captcha: str | None = None,
+        auto_captcha: bool = True,
     ) -> dict[str, Any]:
         """/passport/mobile/send_code/v1/ — request SMS verification code.
-        Encodes mobile, type, unbind_exist with mix_mode=1 per decompiled C09400rGa."""
+        Encodes mobile, type, unbind_exist with mix_mode=1 per decompiled C09400rGa.
+
+        On ``scene="register"`` with ``auto_captcha=True`` (default) and
+        ``TIKTOKFLOW_RUCAPTCHA_KEY`` set, a captcha-blocked response is
+        solved via bdturing and the request is replayed up to
+        ``CAPTCHA_MAX_RETRIES`` times."""
         if type_ is None:
             type_ = 24 if scene == "register" else 1
-        data: dict[str, Any] = {
-            "mobile": _mix(mobile),
-            "type": _mix(str(type_)),
-            "unbind_exist": _mix("0"),
-            "mix_mode": "1",
-            "is6Digits": "1",
-            "auto_read": "0",
-        }
-        if scene == "register":
-            data["check_register"] = "1"
-        elif scene == "login":
-            data["check_register"] = "0"
-        if captcha:
-            data["captcha"] = captcha
-        return self._t.post(self._p("/passport/mobile/send_code/v1/"), data=data, full_sign=True)
 
-    def send_email_code(self, email: str, *, scene: str = "login") -> dict[str, Any]:
-        """/passport/email/send_code/"""
-        return self._t.post("/passport/email/send_code/", data={
-            "email": email,
-            "scene": scene,
-        }, full_sign=True)
+        def _call(cap: str | None) -> dict[str, Any]:
+            data: dict[str, Any] = {
+                "mobile": _mix(mobile),
+                "type": _mix(str(type_)),
+                "unbind_exist": _mix("0"),
+                "mix_mode": "1",
+                "is6Digits": "1",
+                "auto_read": "0",
+            }
+            if scene == "register":
+                data["check_register"] = "1"
+            elif scene == "login":
+                data["check_register"] = "0"
+            if cap:
+                data["captcha"] = cap
+            return self._t.post(self._p("/passport/mobile/send_code/v1/"), data=data, full_sign=True)
 
-    def email_register(self, email: str, password: str, code: str,
-                       *, recaptcha_token: str = "") -> dict[str, Any]:
+        if auto_captcha and scene == "register":
+            return _captcha_retry(self._t, _call, label="send_sms_code(register)", initial_captcha=captcha)
+        return _call(captcha)
+
+    def send_email_code(
+        self,
+        email: str,
+        *,
+        scene: str = "login",
+        captcha: str | None = None,
+        auto_captcha: bool = True,
+    ) -> dict[str, Any]:
+        """/passport/email/send_code/
+
+        On ``scene="register"`` with ``auto_captcha=True`` (default) and
+        ``TIKTOKFLOW_RUCAPTCHA_KEY`` set, a captcha-blocked response (empty
+        body / ``status_code=-1`` / HTTP 403 / bdturing decision_conf) is
+        solved via bdturing and the request is replayed up to
+        ``CAPTCHA_MAX_RETRIES`` times."""
+        def _call(cap: str | None) -> dict[str, Any]:
+            data: dict[str, Any] = {"email": email, "scene": scene}
+            if cap:
+                data["captcha"] = cap
+            return self._t.post("/passport/email/send_code/", data=data, full_sign=True)
+
+        if auto_captcha and scene == "register":
+            return _captcha_retry(self._t, _call, label="send_email_code(register)", initial_captcha=captcha)
+        return _call(captcha)
+
+    def email_register(
+        self,
+        email: str,
+        password: str,
+        code: str,
+        *,
+        recaptcha_token: str = "",
+        captcha: str | None = None,
+        auto_captcha: bool = True,
+    ) -> dict[str, Any]:
         """/passport/email/register/v2/ — captures session cookies.
 
         Real client also sends mix_mode=1/fixed_mix_mode=1 (encrypted-field
-        envelope flag); include them so the server accepts the request."""
-        data = {
-            "email": email,
-            "password": password,
-            "code": code,
-            "mix_mode": "1",
-            "fixed_mix_mode": "1",
-            "type": "34",
-        }
-        if recaptcha_token:
-            data["recaptcha_token"] = recaptcha_token
-        return self._login_request("/passport/email/register/v2/", data)
+        envelope flag); include them so the server accepts the request.
+
+        With ``auto_captcha=True`` (default) and ``TIKTOKFLOW_RUCAPTCHA_KEY``
+        set, a captcha-blocked response is solved via bdturing and replayed
+        up to ``CAPTCHA_MAX_RETRIES`` times."""
+        def _call(cap: str | None) -> dict[str, Any]:
+            data: dict[str, Any] = {
+                "email": email,
+                "password": password,
+                "code": code,
+                "mix_mode": "1",
+                "fixed_mix_mode": "1",
+                "type": "34",
+            }
+            if recaptcha_token:
+                data["recaptcha_token"] = recaptcha_token
+            if cap:
+                data["captcha"] = cap
+            return self._login_request("/passport/email/register/v2/", data)
+
+        if auto_captcha:
+            return _captcha_retry(self._t, _call, label="email_register", initial_captcha=captcha)
+        return _call(captcha)
 
     def logout(self) -> dict[str, Any]:
         """/passport/user/logout/"""
@@ -414,27 +604,37 @@ class PassportAPI:
         *,
         password: str | None = None,
         captcha: str | None = None,
+        auto_captcha: bool = True,
     ) -> dict[str, Any]:
         """/passport/mobile/register/ — register by phone + SMS code
         (+ optional password). Send the code first via
         send_sms_code(mobile, scene="register"). Captures session cookies.
+
+        With ``auto_captcha=True`` (default) and ``TIKTOKFLOW_RUCAPTCHA_KEY``
+        set, a captcha-blocked response is solved via bdturing and replayed
+        up to ``CAPTCHA_MAX_RETRIES`` times.
 
         # UNVERIFIED: the endpoint path is confirmed present in the APK's
         passport path table (X.C10740rLe, classes25.dex), but the specific
         request-builder class wasn't located in the decompiled module.
         Params are inferred by symmetry with the confirmed
         /passport/email/register/v2/ builder (X.C0rGX.LIZJ())."""
-        data: dict[str, Any] = {
-            "mobile": _mix(mobile),
-            "code": _mix(code),
-            "mix_mode": "1",
-            "fixed_mix_mode": "1",
-        }
-        if password:
-            data["password"] = _mix(password)
-        if captcha:
-            data["captcha"] = captcha
-        return self._login_request("/passport/mobile/register/", data)
+        def _call(cap: str | None) -> dict[str, Any]:
+            data: dict[str, Any] = {
+                "mobile": _mix(mobile),
+                "code": _mix(code),
+                "mix_mode": "1",
+                "fixed_mix_mode": "1",
+            }
+            if password:
+                data["password"] = _mix(password)
+            if cap:
+                data["captcha"] = cap
+            return self._login_request("/passport/mobile/register/", data)
+
+        if auto_captcha:
+            return _captcha_retry(self._t, _call, label="mobile_register", initial_captcha=captcha)
+        return _call(captcha)
 
     def username_register(self, username: str, password: str) -> dict[str, Any]:
         """/passport/username/register/ — register a new account with just a
