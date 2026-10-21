@@ -1,9 +1,9 @@
 # tiktok-private-api
 
-[![status](https://img.shields.io/badge/status-early--but--usable-orange)](STATUS.md)
+[![status](https://img.shields.io/badge/status-early--but--usable-orange)](https://github.com/molkex/tiktok-private-api/blob/main/STATUS.md)
 [![python](https://img.shields.io/badge/python-%E2%89%A53.11-blue)](https://pypi.org/project/tiktok-private-api/)
 [![pypi](https://img.shields.io/pypi/v/tiktok-private-api)](https://pypi.org/project/tiktok-private-api/)
-[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![license](https://img.shields.io/badge/license-MIT-green)](https://github.com/molkex/tiktok-private-api/blob/main/LICENSE)
 [![telegram](https://img.shields.io/badge/key%20bot-%40tiktok__private__api__bot-26A5E4?logo=telegram)](https://t.me/tiktok_private_api_bot)
 
 A Python SDK for the private TikTok mobile API — the same endpoints the
@@ -14,7 +14,7 @@ not ours.
 
 > **Where the project is right now:** reads work well, logins work, writes
 > like follow/like/comment are a known dead end on pure HTTP. See
-> [**STATUS.md**](STATUS.md) for the honest capability matrix, dead ends,
+> [**STATUS.md**](https://github.com/molkex/tiktok-private-api/blob/main/STATUS.md) for the honest capability matrix, dead ends,
 > roadmap, and how to help.
 
 ```bash
@@ -302,11 +302,11 @@ related marks belong to ByteDance Ltd. Use the SDK only on accounts and
 data you are authorised to access, and in compliance with applicable law
 and TikTok's terms of service.
 
-Licensed under the MIT License — see [`LICENSE`](LICENSE).
+Licensed under the MIT License — see [`LICENSE`](https://github.com/molkex/tiktok-private-api/blob/main/LICENSE).
 
 ## Links
 
 - Issues — <https://github.com/molkex/tiktok-private-api/issues>
-- Security policy — [`SECURITY.md`](SECURITY.md)
+- Security policy — [`SECURITY.md`](https://github.com/molkex/tiktok-private-api/blob/main/SECURITY.md)
 - Key dispatcher — [`@tiktok_private_api_bot`](https://t.me/tiktok_private_api_bot)
 - Maintainer — [`@mxmtkchk`](https://t.me/mxmtkchk)
