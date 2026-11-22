@@ -12,10 +12,15 @@ Android and iOS apps use. Pure HTTP from your machine; request signing
 hosted service you call with an API key. Requests to TikTok leave your IP,
 not ours.
 
-> **Where the project is right now:** reads work well, logins work, writes
-> like follow/like/comment are a known dead end on pure HTTP. See
-> [**STATUS.md**](https://github.com/molkex/tiktok-private-api/blob/main/STATUS.md) for the honest capability matrix, dead ends,
-> roadmap, and how to help.
+> **Where the project is right now (Free during beta):** no paid plans — grab a free key via
+> [@tiktok_private_api_bot](https://t.me/tiktok_private_api_bot) (`/key`). Runs on **Linux / macOS / Windows**
+> (Python >=3.11, zero emulators). Reads and logins work well; writes like follow/like/comment are a
+> known dead end on pure HTTP. See [**STATUS.md**](https://github.com/molkex/tiktok-private-api/blob/main/STATUS.md)
+> for the honest capability matrix, dead ends, roadmap, and how to help.
+>
+> **Ecosystem:** [instagram-private-api](https://github.com/molkex/instagram-private-api) ·
+> [threads-private-api](https://github.com/molkex/threads-private-api) ·
+> [tiktok-private-api](https://github.com/molkex/tiktok-private-api)
 
 ```bash
 pip install tiktok-private-api
